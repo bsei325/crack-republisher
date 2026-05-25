@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      2.4.0
+// @version      2.5.0
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -456,36 +456,67 @@
         }
 
         try {
-            toast('새 스토리 생성 중...', 5000);
+            const payload = sanitizeForPatch(data);
+            console.log(`${LOG} 복원 데이터`, { keys: Object.keys(payload), name: payload.name });
 
-            let createRes;
-            for (const url of [`${API_BASE}/stories`, `${API_BASE}/stories/v2`]) {
+            // POST로 스토리 생성 (sanitized 데이터 전체 전송)
+            toast(`"${name}" 복원 중...`, 5000);
+
+            let newId = null;
+            const postUrls = [
+                `${API_BASE}/stories`,
+                `${API_BASE}/stories/v2`
+            ];
+
+            for (const url of postUrls) {
                 try {
-                    createRes = await apiFetch('POST', url, {
-                        name: (data.name || '복원된 스토리').slice(0, 30),
-                        description: (data.description || '복원').slice(0, 500),
-                        chatType: 'rolePlaying'
-                    }, `생성`);
-                    if (createRes?.data?._id) break;
+                    const res = await apiFetch('POST', url, payload, `POST ${url}`);
+                    newId = res?.data?._id || res?.data?.id || res?._id;
+                    if (newId) {
+                        console.log(`${LOG} POST 생성 성공`, { url, newId });
+                        break;
+                    }
                 } catch (err) {
-                    if (err?.status !== 404 && err?.status !== 405) throw err;
+                    console.warn(`${LOG} POST 시도 ${url}:`, err?.status, err?.message?.slice(0, 100));
+                    // 404/405 = 이 URL 아님 → 다음
+                    if (err?.status === 404 || err?.status === 405) continue;
+                    // 400 = 필드 문제 → 최소 필드로 재시도
+                    if (err?.status === 400) continue;
+                    throw err;
                 }
             }
 
-            const newId = createRes?.data?._id || createRes?.data?.id;
+            // POST 실패 시 최소 필드로 재시도 + PATCH
+            if (!newId) {
+                console.log(`${LOG} 전체 데이터 POST 실패, 최소 필드로 재시도`);
+                for (const url of postUrls) {
+                    try {
+                        const res = await apiFetch('POST', url, {
+                            name: payload.name,
+                            chatType: 'rolePlaying'
+                        }, `POST 최소 ${url}`);
+                        newId = res?.data?._id || res?.data?.id;
+                        if (newId) break;
+                    } catch (err) {
+                        if (err?.status === 404 || err?.status === 405) continue;
+                        if (err?.status === 400) continue;
+                        throw err;
+                    }
+                }
+            }
+
             if (!newId) throw new Error('스토리 생성 실패. 미등록 슬롯이 꽉 찼을 수 있어요.');
 
-            // PATCH
+            // PATCH로 데이터 채우기
             toast('데이터 채우는 중...', 5000);
 
-            const patchPayload = sanitizeForPatch(data);
-
+            // 새 스토리의 snapshotId, baseSetId 가져오기
             try {
                 const newDetail = await apiFetch('GET', `${API_BASE}/stories/me/${newId}`, undefined, '조회');
                 const nr = newDetail?.data;
-                if (nr?.snapshotId) patchPayload.expectedBaseSnapshotId = nr.snapshotId;
-                if (nr?.startingSets?.length && patchPayload.startingSets?.length) {
-                    patchPayload.startingSets.forEach((set, i) => {
+                if (nr?.snapshotId) payload.expectedBaseSnapshotId = nr.snapshotId;
+                if (nr?.startingSets?.length && payload.startingSets?.length) {
+                    payload.startingSets.forEach((set, i) => {
                         if (nr.startingSets[i]) {
                             set.baseSetId = nr.startingSets[i].baseSetId || nr.startingSets[i]._id;
                         }
@@ -493,21 +524,21 @@
                 }
             } catch (_) {}
 
-            console.log(`${LOG} 복원 PATCH`, { newId, keys: Object.keys(patchPayload) });
-
+            let patched = false;
             for (const url of [`${API_BASE}/stories/${newId}/v2`, `${API_BASE}/stories/${newId}`]) {
                 try {
-                    await apiFetch('PATCH', url, patchPayload, 'PATCH');
-                    toast(`✓ "${name}" 복원 완료!\n/my에서 확인해주세요.`, 3000);
-                    setTimeout(() => { location.href = `/my`; }, 1500);
-                    return;
+                    await apiFetch('PATCH', url, payload, `PATCH ${url}`);
+                    patched = true;
+                    break;
                 } catch (err) {
-                    console.warn(`${LOG} PATCH 실패 ${url}`, err?.message);
+                    console.warn(`${LOG} PATCH 시도 ${url}:`, err?.status, err?.message?.slice(0, 100));
                     if (err?.status === 404 || err?.status === 405) continue;
                     if (err?.status === 400) continue;
-                    throw err;
                 }
             }
+
+            toast(`✓ "${name}" 복원 완료!\n/my에서 확인해주세요.${patched ? '' : '\n(기본 데이터만 저장됨)'}`, 4000);
+            setTimeout(() => { location.href = '/my'; }, 1500);
 
             toast('스토리 생성됨! /my에서 확인해주세요.', 4000);
             setTimeout(() => { location.href = '/my'; }, 1500);
@@ -648,7 +679,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v2.4.0`);
+        console.log(`${LOG} 로드 완료 v2.5.0`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
