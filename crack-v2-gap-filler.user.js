@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.0.0
+// @version      1.2.0
 // @author       me
-// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 얇은 투명 이미지로 채움
+// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 스토리 안의 기존 투명 이미지로 채움
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @updateURL    https://raw.githubusercontent.com/bsei325/crack-republisher/main/crack-v2-gap-filler.user.js
@@ -16,10 +16,8 @@
     const API_BASE = 'https://crack-api.wrtn.ai/crack-api';
     const LOG = '[v2 빈칸 채우기]';
 
-    // 1x1은 화면에서 큰 정사각형 빈칸처럼 보일 수 있어서, 아주 얇고 긴 투명 PNG를 사용한다.
-    // 이 파일을 GitHub 저장소 루트에 같이 올려야 한다.
-    const TRANSPARENT_STRIP_IMAGE_URL =
-        'https://raw.githubusercontent.com/bsei325/crack-republisher/main/transparent-strip-2000x4.png';
+    // 외부 URL(GitHub raw)은 크랙 서버가 유효하지 않은 이미지로 막을 수 있다.
+    // 그래서 이미 스토리 안에 업로드되어 있는 '투명 strip 이미지'의 URL을 골라 그 URL을 재사용한다.
 
     GM_addStyle(`
         .vgf-toast {
@@ -302,7 +300,7 @@
         };
     }
 
-    function fillMissingCellsWithTransparent(set) {
+    function fillMissingCellsWithTransparent(set, placeholderUrl) {
         const normalized = normalizeV2SetLabels(set);
 
         const categories = normalized.imageMatrix.categories;
@@ -325,7 +323,7 @@
                 images.push({
                     situation,
                     keyword: '',
-                    imageUrl: TRANSPARENT_STRIP_IMAGE_URL,
+                    imageUrl: placeholderUrl,
                     category
                 });
                 existing.add(key);
@@ -403,8 +401,8 @@
         return getFirst(set?.baseSetId, set?.setId, set?._id, set?.id);
     }
 
-    function buildPatchStartingSet(set) {
-        const filled = fillMissingCellsWithTransparent(set);
+    function buildPatchStartingSet(set, placeholderUrl) {
+        const filled = fillMissingCellsWithTransparent(set, placeholderUrl);
 
         const out = compactObject({
             baseSetId: getBaseSetId(set),
@@ -418,7 +416,6 @@
             imageMatrix: filled.imageMatrix
         });
 
-        // playGuide는 빈 문자열이면 PATCH에서 에러를 낼 수 있어서, 내용이 있을 때만 넣는다.
         if (typeof set?.playGuide === 'string' && set.playGuide.trim()) {
             out.playGuide = set.playGuide;
         }
@@ -426,8 +423,8 @@
         return { set: out, added: filled.added };
     }
 
-    function buildPatchPayload(raw) {
-        const setResults = (Array.isArray(raw?.startingSets) ? raw.startingSets : []).map(buildPatchStartingSet);
+    function buildPatchPayload(raw, placeholderUrl) {
+        const setResults = (Array.isArray(raw?.startingSets) ? raw.startingSets : []).map(set => buildPatchStartingSet(set, placeholderUrl));
         const startingSets = setResults.map(r => r.set);
         const added = setResults.reduce((sum, r) => sum + r.added, 0);
 
@@ -444,7 +441,7 @@
             promptTemplate: normalizeTemplateForPatch(raw?.promptTemplate),
             isCommentBlocked: !!raw?.isCommentBlocked,
             startingSets,
-            shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw.shortcutCommands : [],
+            shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw?.shortcutCommands : [],
             defaultCrackerModel: raw?.defaultCrackerModel || 'superchat_2_0',
             chatType: normalizeSimpleValue(raw?.chatType) || raw?.chatType || 'rolePlaying',
             genreId: getFirst(raw?.genreId, raw?.genre?._id, raw?.genre?.id),
@@ -461,7 +458,68 @@
         return { payload, added };
     }
 
-    async function fillStoryGaps(storyId) {
+    
+    function collectExistingImageChoices(raw) {
+        const choices = [];
+        const seen = new Set();
+        const sets = Array.isArray(raw?.startingSets) ? raw.startingSets : [];
+
+        sets.forEach((set, setIndex) => {
+            const normalized = normalizeV2SetLabels(set);
+            (normalized.situationImages || []).forEach((img, imageIndex) => {
+                if (!img?.imageUrl) return;
+                const category = img.category ? String(img.category).slice(0, 10) : '';
+                const situation = img.situation ? String(img.situation).slice(0, 10) : '';
+                const keyword = img.keyword ? String(img.keyword).slice(0, 10) : '';
+                const combo = `${category}_${situation}`;
+                const dedupe = `${combo}|||${img.imageUrl}`;
+                if (seen.has(dedupe)) return;
+                seen.add(dedupe);
+                choices.push({
+                    setName: set?.name || `세트${setIndex + 1}`,
+                    category,
+                    situation,
+                    keyword,
+                    combo,
+                    imageUrl: img.imageUrl,
+                    setIndex,
+                    imageIndex
+                });
+            });
+        });
+        return choices;
+    }
+
+    function pickPlaceholderChoice(choices) {
+        if (!choices.length) return null;
+
+        const suggested = choices.find(c => /투명|빈칸|공백|blank|transparent/i.test(`${c.combo} ${c.keyword} ${c.setName}`)) || choices[0];
+        const lines = choices.slice(0, 40).map((c, i) => `${i + 1}. [${c.setName}] ${c.combo}${c.keyword ? ` (키워드:${c.keyword})` : ''}`);
+        const guide = [
+            '투명 strip 이미지가 들어있는 칸을 골라줘.',
+            '번호 또는 "이름_상황" 형식으로 입력하면 돼.',
+            '',
+            `예시 추천값: ${suggested ? suggested.combo : ''}`,
+            '',
+            ...lines,
+            choices.length > 40 ? `... 외 ${choices.length - 40}개` : ''
+        ].filter(Boolean).join('\n');
+
+        const input = prompt(guide, suggested ? suggested.combo : '');
+        if (input === null) return null;
+        const trimmed = String(input).trim();
+        if (!trimmed) return null;
+
+        const index = Number(trimmed);
+        if (Number.isInteger(index) && index >= 1 && index <= choices.length) {
+            return choices[index - 1];
+        }
+
+        const normalizedInput = trimmed.replace(/\s+/g, '');
+        return choices.find(c => c.combo.replace(/\s+/g, '') === normalizedInput) || null;
+    }
+
+async function fillStoryGaps(storyId) {
         toast('v2 이미지 배치표 확인 중...');
         try {
             const detail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 조회');
@@ -473,12 +531,24 @@
                 return;
             }
 
-            const { payload, added } = buildPatchPayload(raw);
+            const choices = collectExistingImageChoices(raw);
+            if (!choices.length) {
+                toast('스토리 안에 등록된 이미지가 없어요.', 4200);
+                return;
+            }
+
+            const picked = pickPlaceholderChoice(choices);
+            if (!picked) {
+                toast('투명 이미지 선택을 취소했어요.', 3600);
+                return;
+            }
+
+            const { payload, added } = buildPatchPayload(raw, picked.imageUrl);
 
             console.log(`${LOG} PATCH payload`, {
                 storyId,
                 added,
-                placeholder: TRANSPARENT_STRIP_IMAGE_URL,
+                placeholderChoice: picked,
                 payload
             });
 
@@ -488,19 +558,19 @@
             }
 
             const ok = confirm(
-                `v2 배치표 빈칸 ${added}개를 얇은 투명 이미지로 채울까요?\n\n` +
-                `다른 캐릭터/표정으로 복제하지 않고,\n` +
-                `없는 조합에만 투명 strip 이미지를 넣습니다.`
+                `선택한 투명 이미지: [${picked.setName}] ${picked.combo}\n\n` +
+                `v2 배치표 빈칸 ${added}개를 이 이미지 URL로 채울까요?\n\n` +
+                `다른 캐릭터/표정으로 복제하지 않고,\n없는 조합에만 같은 투명 이미지를 넣습니다.`
             );
             if (!ok) {
                 toast('취소했어요.');
                 return;
             }
 
-            toast(`빈칸 ${added}개를 투명 strip으로 채우는 중...`, 5000);
+            toast(`빈칸 ${added}개를 기존 투명 이미지로 채우는 중...`, 5000);
             await apiFetch('PATCH', `${API_BASE}/stories/${storyId}/v2`, payload, '투명 빈칸 PATCH');
 
-            toast(`✓ 완료!\n빈 조합 ${added}개를 얇은 투명 이미지로 채웠어요.`, 5200);
+            toast(`✓ 완료!\n빈 조합 ${added}개를 기존 투명 이미지로 채웠어요.`, 5200);
         } catch (err) {
             console.error(`${LOG} 실패`, err);
             toast('실패 ㅠㅠ\n' + String(err?.message || err).slice(0, 220), 7000);
@@ -575,7 +645,7 @@
             return;
         }
 
-        container.appendChild(createButton('🧩 투명 strip으로 빈칸 채우기', () => fillStoryGaps(info.id)));
+        container.appendChild(createButton('🧩 기존 투명 이미지로 빈칸 채우기', () => fillStoryGaps(info.id)));
     }
 
     function init() {
@@ -583,7 +653,7 @@
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.0.0`);
+        console.log(`${LOG} 로드 완료 v1.2.0`);
     }
 
     if (document.readyState === 'loading') {
