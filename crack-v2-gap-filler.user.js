@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.8.3
+// @version      1.9.0
 // @author       me
 // @description  v2 이미지 배치표 빈 조합에 투명 이미지를 개별 업로드 (각 빈칸별 정확한 category/situation)
 // @match        https://crack.wrtn.ai/*
@@ -468,60 +468,71 @@
         const allUploads = Array.from(uniqueGaps.values());
         const startingSets = gapsPerSet.map(g => ({ baseSetId: g.baseSetId }));
 
-        // ★ 10개씩 나눠서 배치 처리
-        const BATCH_SIZE = 10;
+        // ★ 25개씩 배치
+        const BATCH_SIZE = 25;
         const batches = [];
         for (let i = 0; i < allUploads.length; i += BATCH_SIZE) {
             batches.push(allUploads.slice(i, i + BATCH_SIZE));
         }
 
+        const totalS3Expected = allUploads.length * startingSets.length;
+        const estMinutes = Math.ceil(totalS3Expected * 0.4 / 60); // ~0.4초/PUT 추정
+
         console.log(`${LOG} 배치 업로드 계획`, {
-            sourceId,
             총빈칸: allUploads.length,
-            배치수: batches.length,
             세트수: startingSets.length,
-            배치크기: BATCH_SIZE
+            총S3PUT: totalS3Expected,
+            배치수: batches.length,
+            예상시간: `~${estMinutes}분`
         });
+
+        toast(`빈칸 ${allUploads.length}개 × ${startingSets.length}세트 = ${totalS3Expected}건 업로드 시작\n(약 ${estMinutes}분 소요)`, 5000);
 
         let totalPut = 0;
         let totalFail = 0;
-        const uploadedUrlMap = new Map(); // baseSetId → Map<"cat|||sit", url>
+        const uploadedUrlMap = new Map();
 
         for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
             const batch = batches[batchIdx];
+            const pct = Math.round(((batchIdx) / batches.length) * 100);
             const progress = `[${batchIdx + 1}/${batches.length}]`;
 
-            toast(`업로드 중... ${progress} (${totalPut}/${allUploads.length})`, 6000);
-            console.log(`${LOG} 배치 ${progress} 시작`, { count: batch.length });
+            toast(`업로드 ${pct}% ${progress}\n성공 ${totalPut} / 실패 ${totalFail}`, 6000);
 
-            // 1) presigned URL 요청
+            // ★ presigned 요청 (실패 시 1번 재시도)
             const bulkPayload = { sourceId, uploads: batch, startingSets };
+            let bulkRes = null;
 
-            let bulkRes;
-            try {
-                bulkRes = await apiFetch(
-                    'POST',
-                    `${API_BASE}/situation-images/presigned-urls/bulk`,
-                    bulkPayload,
-                    `presigned bulk ${progress}`
-                );
-            } catch (err) {
-                console.error(`${LOG} 배치 ${progress} presigned 실패`, err?.message);
-                totalFail += batch.length * startingSets.length;
-                continue;
+            for (let retry = 0; retry < 2; retry++) {
+                try {
+                    bulkRes = await apiFetch(
+                        'POST',
+                        `${API_BASE}/situation-images/presigned-urls/bulk`,
+                        bulkPayload,
+                        `presigned ${progress} try${retry}`
+                    );
+                    break;
+                } catch (err) {
+                    console.warn(`${LOG} 배치 ${progress} presigned 실패 (${retry + 1}/2)`, err?.message);
+                    if (retry === 0) {
+                        await new Promise(r => setTimeout(r, 2000));
+                    } else {
+                        totalFail += batch.length * startingSets.length;
+                    }
+                }
             }
 
-            const responseSets = bulkRes?.data?.startingSets || [];
-            const bulkId = bulkRes?.data?.bulkId;
+            if (!bulkRes) continue;
 
-            // 2) S3 PUT + URL 수집
+            const responseSets = bulkRes?.data?.startingSets || [];
+
+            // ★ S3 PUT
             for (const setResult of responseSets) {
                 const baseSetId = setResult?.baseSetId || '';
                 const uploadsArr = setResult?.uploads || [];
                 const rejected = setResult?.rejected || [];
 
                 if (rejected.length) {
-                    console.warn(`${LOG} 거부됨 ${progress}`, { baseSetId, rejected: rejected.length });
                     totalFail += rejected.length;
                 }
 
@@ -534,7 +545,13 @@
                     const presignedUrl = upload?.url;
                     if (!presignedUrl) continue;
 
-                    const ok = await putToS3(presignedUrl, blob);
+                    // S3 PUT 실패 시 1번 재시도
+                    let ok = await putToS3(presignedUrl, blob);
+                    if (!ok) {
+                        await new Promise(r => setTimeout(r, 500));
+                        ok = await putToS3(presignedUrl, blob);
+                    }
+
                     if (ok) {
                         totalPut++;
                         const finalUrl = String(presignedUrl).split('?')[0];
@@ -549,16 +566,14 @@
                 }
             }
 
-            console.log(`${LOG} 배치 ${progress} 완료: 누적 성공 ${totalPut}, 실패 ${totalFail}`);
-
-            // 3) 배치 간 서버 처리 대기
-            if (bulkId) {
-                await pollBulkProgress(bulkId, 15);
+            // 배치 간 짧은 대기 (서버 부담 줄이기)
+            if (batchIdx < batches.length - 1) {
+                await new Promise(r => setTimeout(r, 800));
             }
 
-            // 배치 사이 짧은 대기 (마지막 배치 제외)
-            if (batchIdx < batches.length - 1) {
-                await new Promise(r => setTimeout(r, 1500));
+            // 10배치마다 진행 로그
+            if ((batchIdx + 1) % 10 === 0) {
+                console.log(`${LOG} 진행: ${batchIdx + 1}/${batches.length} 배치, 성공 ${totalPut}, 실패 ${totalFail}`);
             }
         }
 
@@ -568,8 +583,8 @@
             throw new Error('S3 업로드가 전부 실패했어요.');
         }
 
-        // 마지막 배치 처리 대기
-        toast(`업로드 ${totalPut}개 완료, 서버 처리 대기 중...`, 5000);
+        // 마지막 서버 처리 대기
+        toast(`업로드 ${totalPut}건 완료! 서버 처리 대기 중...`, 5000);
         await new Promise(r => setTimeout(r, 3000));
 
         return { putCount: totalPut, putFail: totalFail, uploadedUrlMap };
@@ -783,11 +798,12 @@
                 storyId,
                 totalAdded,
                 startingSetsCount: payload?.startingSets?.length,
-                situationImagesCount: payload?.startingSets?.map(s => s?.situationImages?.length)
+                situationImagesCount: payload?.startingSets?.map(s => s?.situationImages?.length),
+                payloadSizeKB: Math.round(JSON.stringify(payload).length / 1024)
             });
 
             if (totalAdded <= 0) {
-                toast('채울 빈칸이 없거나 업로드 URL 매칭에 실패했어요.', 4200);
+                toast('업로드 URL 매칭에 실패했어요.\nConsole 로그를 확인해주세요.', 4200);
                 return;
             }
 
@@ -803,8 +819,14 @@
                     break;
                 } catch (err) {
                     const msg = String(err?.message || '');
-                    console.warn(`${LOG} PATCH 재시도 ${attempt}`, msg);
-                    if (attempt < 5 && (msg.includes('업로드') || msg.includes('완료') || err?.status === 400)) {
+                    const status = err?.status || 0;
+                    console.warn(`${LOG} PATCH 재시도 ${attempt}`, { status, msg: msg.slice(0, 100) });
+
+                    if (status === 413) {
+                        throw new Error('PATCH 데이터가 너무 커요. 빈칸이 너무 많을 수 있어요.');
+                    }
+
+                    if (attempt < 5 && (msg.includes('업로드') || msg.includes('완료') || status === 400)) {
                         toast(`서버 처리 대기 중... (${attempt}/5)`, 3000);
                         await new Promise(r => setTimeout(r, 3000 * attempt));
                     } else {
@@ -891,7 +913,7 @@
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.8.3`);
+        console.log(`${LOG} 로드 완료 v1.9.0`);
     }
 
     if (document.readyState === 'loading') {
