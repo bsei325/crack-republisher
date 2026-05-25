@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.8.2
+// @version      1.8.3
 // @author       me
 // @description  v2 이미지 배치표 빈 조합에 투명 이미지를 개별 업로드 (각 빈칸별 정확한 category/situation)
 // @match        https://crack.wrtn.ai/*
@@ -454,8 +454,7 @@
         const sourceId = getStorySourceId(raw, storyId);
         if (!sourceId) throw new Error('sourceId를 못 찾았어요.');
 
-        // 모든 세트의 빈칸을 하나의 bulk 요청에 넣기
-        // uploads = 유니크한 category/situation 조합들
+        // 유니크한 빈칸 조합 수집
         const uniqueGaps = new Map();
         for (const { gaps } of gapsPerSet) {
             for (const g of gaps) {
@@ -466,95 +465,114 @@
             }
         }
 
-        const uploads = Array.from(uniqueGaps.values());
+        const allUploads = Array.from(uniqueGaps.values());
         const startingSets = gapsPerSet.map(g => ({ baseSetId: g.baseSetId }));
 
-        console.log(`${LOG} 개별 빈칸 업로드 요청`, {
+        // ★ 10개씩 나눠서 배치 처리
+        const BATCH_SIZE = 10;
+        const batches = [];
+        for (let i = 0; i < allUploads.length; i += BATCH_SIZE) {
+            batches.push(allUploads.slice(i, i + BATCH_SIZE));
+        }
+
+        console.log(`${LOG} 배치 업로드 계획`, {
             sourceId,
-            uploadsCount: uploads.length,
-            setsCount: startingSets.length,
-            uploads: uploads.slice(0, 10) // 처음 10개만 로그
+            총빈칸: allUploads.length,
+            배치수: batches.length,
+            세트수: startingSets.length,
+            배치크기: BATCH_SIZE
         });
 
-        const bulkPayload = { sourceId, uploads, startingSets };
-
-        const bulkRes = await apiFetch(
-            'POST',
-            `${API_BASE}/situation-images/presigned-urls/bulk`,
-            bulkPayload,
-            '빈칸별 presigned bulk'
-        );
-
-        console.log(`${LOG} presigned bulk 응답`, {
-            result: bulkRes?.result,
-            bulkId: bulkRes?.data?.bulkId,
-            setsCount: bulkRes?.data?.startingSets?.length
-        });
-
-        const bulkId = bulkRes?.data?.bulkId;
-        const responseSets = bulkRes?.data?.startingSets || [];
-
-        // 모든 presigned URL에 투명 이미지 PUT + final URL 수집
-        let putCount = 0;
-        let putFail = 0;
-
-        // ★ baseSetId별로 {category|||situation → finalUrl} 수집
+        let totalPut = 0;
+        let totalFail = 0;
         const uploadedUrlMap = new Map(); // baseSetId → Map<"cat|||sit", url>
 
-        for (const setResult of responseSets) {
-            const baseSetId = setResult?.baseSetId || '';
-            const uploadsArr = setResult?.uploads || [];
-            const rejected = setResult?.rejected || [];
+        for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+            const batch = batches[batchIdx];
+            const progress = `[${batchIdx + 1}/${batches.length}]`;
 
-            if (rejected.length) {
-                console.warn(`${LOG} 거부된 업로드`, { baseSetId, rejected });
+            toast(`업로드 중... ${progress} (${totalPut}/${allUploads.length})`, 6000);
+            console.log(`${LOG} 배치 ${progress} 시작`, { count: batch.length });
+
+            // 1) presigned URL 요청
+            const bulkPayload = { sourceId, uploads: batch, startingSets };
+
+            let bulkRes;
+            try {
+                bulkRes = await apiFetch(
+                    'POST',
+                    `${API_BASE}/situation-images/presigned-urls/bulk`,
+                    bulkPayload,
+                    `presigned bulk ${progress}`
+                );
+            } catch (err) {
+                console.error(`${LOG} 배치 ${progress} presigned 실패`, err?.message);
+                totalFail += batch.length * startingSets.length;
+                continue;
             }
 
-            if (!uploadedUrlMap.has(baseSetId)) {
-                uploadedUrlMap.set(baseSetId, new Map());
-            }
-            const setUrlMap = uploadedUrlMap.get(baseSetId);
+            const responseSets = bulkRes?.data?.startingSets || [];
+            const bulkId = bulkRes?.data?.bulkId;
 
-            for (const upload of uploadsArr) {
-                const presignedUrl = upload?.url;
-                if (!presignedUrl) continue;
+            // 2) S3 PUT + URL 수집
+            for (const setResult of responseSets) {
+                const baseSetId = setResult?.baseSetId || '';
+                const uploadsArr = setResult?.uploads || [];
+                const rejected = setResult?.rejected || [];
 
-                const ok = await putToS3(presignedUrl, blob);
-                if (ok) {
-                    putCount++;
-                    const finalUrl = String(presignedUrl).split('?')[0];
-                    const cat = upload?.category || '';
-                    const sit = upload?.situation || '';
-                    if (cat && sit) {
-                        setUrlMap.set(`${cat}|||${sit}`, finalUrl);
-                    }
-                    console.log(`${LOG} S3 PUT 성공`, { baseSetId, cat, sit, finalUrl: finalUrl.slice(-40) });
-                } else {
-                    putFail++;
-                    console.error(`${LOG} S3 PUT 실패`, {
-                        category: upload?.category,
-                        situation: upload?.situation
-                    });
+                if (rejected.length) {
+                    console.warn(`${LOG} 거부됨 ${progress}`, { baseSetId, rejected: rejected.length });
+                    totalFail += rejected.length;
                 }
+
+                if (!uploadedUrlMap.has(baseSetId)) {
+                    uploadedUrlMap.set(baseSetId, new Map());
+                }
+                const setUrlMap = uploadedUrlMap.get(baseSetId);
+
+                for (const upload of uploadsArr) {
+                    const presignedUrl = upload?.url;
+                    if (!presignedUrl) continue;
+
+                    const ok = await putToS3(presignedUrl, blob);
+                    if (ok) {
+                        totalPut++;
+                        const finalUrl = String(presignedUrl).split('?')[0];
+                        const cat = upload?.category || '';
+                        const sit = upload?.situation || '';
+                        if (cat && sit) {
+                            setUrlMap.set(`${cat}|||${sit}`, finalUrl);
+                        }
+                    } else {
+                        totalFail++;
+                    }
+                }
+            }
+
+            console.log(`${LOG} 배치 ${progress} 완료: 누적 성공 ${totalPut}, 실패 ${totalFail}`);
+
+            // 3) 배치 간 서버 처리 대기
+            if (bulkId) {
+                await pollBulkProgress(bulkId, 15);
+            }
+
+            // 배치 사이 짧은 대기 (마지막 배치 제외)
+            if (batchIdx < batches.length - 1) {
+                await new Promise(r => setTimeout(r, 1500));
             }
         }
 
-        console.log(`${LOG} S3 PUT 결과: 성공 ${putCount}, 실패 ${putFail}`);
+        console.log(`${LOG} 전체 S3 PUT 결과: 성공 ${totalPut}, 실패 ${totalFail}`);
 
-        if (putCount === 0) {
+        if (totalPut === 0) {
             throw new Error('S3 업로드가 전부 실패했어요.');
         }
 
-        // 서버 처리 대기 + 폴링
-        if (bulkId) {
-            toast(`S3 업로드 ${putCount}개 완료, 서버 처리 대기 중...`, 8000);
-            await pollBulkProgress(bulkId, 30);
-        } else {
-            toast('서버 처리 대기 중...', 5000);
-            await new Promise(r => setTimeout(r, 8000));
-        }
+        // 마지막 배치 처리 대기
+        toast(`업로드 ${totalPut}개 완료, 서버 처리 대기 중...`, 5000);
+        await new Promise(r => setTimeout(r, 3000));
 
-        return { putCount, putFail, bulkId, uploadedUrlMap };
+        return { putCount: totalPut, putFail: totalFail, uploadedUrlMap };
     }
 
     // ─────────── PATCH용 빌더 (이전과 동일) ───────────
@@ -713,8 +731,15 @@
             const detail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 조회');
             const raw = detail?.data;
             if (!raw) throw new Error('스토리 데이터를 못 가져왔어요.');
+
+            console.log(`${LOG} 스토리 정보`, {
+                name: raw?.name,
+                situationImageVersion: raw?.situationImageVersion,
+                startingSetsCount: raw?.startingSets?.length
+            });
+
             if (raw.situationImageVersion !== 'v2') {
-                toast('이 스토리는 v2 이미지 배치표가 아니에요.', 3600);
+                toast(`이 스토리는 v2 이미지 배치표가 아니에요.\n(현재: ${raw.situationImageVersion || '없음'})`, 3600);
                 return;
             }
 
@@ -866,7 +891,7 @@
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.8.2`);
+        console.log(`${LOG} 로드 완료 v1.8.3`);
     }
 
     if (document.readyState === 'loading') {
