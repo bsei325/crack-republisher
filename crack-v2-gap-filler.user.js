@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.8.1
+// @version      1.8.2
 // @author       me
 // @description  v2 이미지 배치표 빈 조합에 투명 이미지를 개별 업로드 (각 빈칸별 정확한 category/situation)
 // @match        https://crack.wrtn.ai/*
@@ -494,17 +494,26 @@
         const bulkId = bulkRes?.data?.bulkId;
         const responseSets = bulkRes?.data?.startingSets || [];
 
-        // 모든 presigned URL에 투명 이미지 PUT
+        // 모든 presigned URL에 투명 이미지 PUT + final URL 수집
         let putCount = 0;
         let putFail = 0;
 
+        // ★ baseSetId별로 {category|||situation → finalUrl} 수집
+        const uploadedUrlMap = new Map(); // baseSetId → Map<"cat|||sit", url>
+
         for (const setResult of responseSets) {
+            const baseSetId = setResult?.baseSetId || '';
             const uploadsArr = setResult?.uploads || [];
             const rejected = setResult?.rejected || [];
 
             if (rejected.length) {
-                console.warn(`${LOG} 거부된 업로드`, { baseSetId: setResult.baseSetId, rejected });
+                console.warn(`${LOG} 거부된 업로드`, { baseSetId, rejected });
             }
+
+            if (!uploadedUrlMap.has(baseSetId)) {
+                uploadedUrlMap.set(baseSetId, new Map());
+            }
+            const setUrlMap = uploadedUrlMap.get(baseSetId);
 
             for (const upload of uploadsArr) {
                 const presignedUrl = upload?.url;
@@ -513,6 +522,13 @@
                 const ok = await putToS3(presignedUrl, blob);
                 if (ok) {
                     putCount++;
+                    const finalUrl = String(presignedUrl).split('?')[0];
+                    const cat = upload?.category || '';
+                    const sit = upload?.situation || '';
+                    if (cat && sit) {
+                        setUrlMap.set(`${cat}|||${sit}`, finalUrl);
+                    }
+                    console.log(`${LOG} S3 PUT 성공`, { baseSetId, cat, sit, finalUrl: finalUrl.slice(-40) });
                 } else {
                     putFail++;
                     console.error(`${LOG} S3 PUT 실패`, {
@@ -538,7 +554,7 @@
             await new Promise(r => setTimeout(r, 8000));
         }
 
-        return { putCount, putFail, bulkId };
+        return { putCount, putFail, bulkId, uploadedUrlMap };
     }
 
     // ─────────── PATCH용 빌더 (이전과 동일) ───────────
@@ -594,17 +610,55 @@
         );
     }
 
-    function buildPatchPayload(raw) {
+    function buildPatchPayload(raw, uploadedUrlMap) {
         const startingSets = (Array.isArray(raw?.startingSets) ? raw.startingSets : [])
             .map(set => {
+                const baseSetId = getBaseSetId(set);
                 const normalized = normalizeV2SetLabels(set);
+                const categories = normalized.imageMatrix.categories;
+                const situations = normalized.imageMatrix.situations;
+                const images = [...normalized.situationImages];
+
+                // ★ 빈칸에 업로드된 URL 채워넣기
+                const existing = new Set();
+                for (const img of images) {
+                    const cat = img?.category ? String(img.category).slice(0, 10) : '';
+                    const sit = img?.situation ? String(img.situation).slice(0, 10) : '';
+                    if (cat && sit) existing.add(`${cat}|||${sit}`);
+                }
+
+                const setUrlMap = uploadedUrlMap?.get(baseSetId);
+                let added = 0;
+
+                for (const category of categories) {
+                    for (const situation of situations) {
+                        const key = `${category}|||${situation}`;
+                        if (existing.has(key)) continue;
+
+                        // 이 빈칸에 맞는 업로드된 URL 찾기
+                        const url = setUrlMap?.get(key);
+                        if (url) {
+                            images.push({
+                                situation,
+                                keyword: '',
+                                imageUrl: url,
+                                category
+                            });
+                            existing.add(key);
+                            added++;
+                        }
+                    }
+                }
+
+                console.log(`${LOG} 세트 ${set?.name || baseSetId}: 기존 ${normalized.situationImages.length}개 + 추가 ${added}개 = ${images.length}개`);
+
                 return compactObject({
-                    baseSetId: getBaseSetId(set),
+                    baseSetId,
                     name: set?.name || '기본 설정',
                     initialMessages: Array.isArray(set?.initialMessages) ? set.initialMessages : [],
                     situationPrompt: set?.situationPrompt || '',
                     replySuggestions: Array.isArray(set?.replySuggestions) ? set.replySuggestions : [],
-                    situationImages: normalized.situationImages,
+                    situationImages: images,
                     keywordBook: buildKeywordBook(set?.keywordBook),
                     parameters: Array.isArray(set?.parameters) ? set.parameters.map(buildParam) : [],
                     imageMatrix: normalized.imageMatrix,
@@ -612,32 +666,42 @@
                 });
             });
 
-        return compactObject({
-            name: raw?.name || '스토리',
-            description: raw?.description || '설명',
-            simpleDescription: raw?.simpleDescription || '간략한 설명',
-            model: normalizeModelForPatch(raw?.model),
-            storyDetails: raw?.storyDetails || '',
-            chatExamples: Array.isArray(raw?.chatExamples) ? raw.chatExamples : [],
-            tags: Array.isArray(raw?.tags) ? raw.tags : [],
-            visibility: normalizeSimpleValue(raw?.visibility) || raw?.visibility || 'private',
-            target: normalizeSimpleValue(raw?.target) || raw?.target,
-            promptTemplate: normalizeTemplateForPatch(raw?.promptTemplate),
-            isCommentBlocked: !!raw?.isCommentBlocked,
-            startingSets,
-            shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw.shortcutCommands : [],
-            defaultCrackerModel: raw?.defaultCrackerModel || 'superchat_2_0',
-            chatType: normalizeSimpleValue(raw?.chatType) || raw?.chatType || 'rolePlaying',
-            genreId: getFirst(raw?.genreId, raw?.genre?._id, raw?.genre?.id),
-            detailDescription: raw?.detailDescription || '',
-            chatModelId: raw?.chatModelId,
-            portraitImageUrl: getPortraitUrl(raw),
-            situationImageVersion: 'v2',
-            creatorRecommendedMaxOutput: raw?.creatorRecommendedMaxOutput,
-            customPrompt: raw?.customPrompt || '',
-            isMovingPortraitImage: !!(raw?.isMovingPortraitImage || raw?.profileImage?.gif),
-            expectedBaseSnapshotId: raw?.snapshotId
-        });
+        const totalAdded = startingSets.reduce((sum, s) => {
+            const orig = (Array.isArray(raw?.startingSets) ? raw.startingSets : [])
+                .find(os => getBaseSetId(os) === s.baseSetId);
+            const origCount = Array.isArray(orig?.situationImages) ? orig.situationImages.length : 0;
+            return sum + (s.situationImages.length - origCount);
+        }, 0);
+
+        return {
+            payload: compactObject({
+                name: raw?.name || '스토리',
+                description: raw?.description || '설명',
+                simpleDescription: raw?.simpleDescription || '간략한 설명',
+                model: normalizeModelForPatch(raw?.model),
+                storyDetails: raw?.storyDetails || '',
+                chatExamples: Array.isArray(raw?.chatExamples) ? raw.chatExamples : [],
+                tags: Array.isArray(raw?.tags) ? raw.tags : [],
+                visibility: normalizeSimpleValue(raw?.visibility) || raw?.visibility || 'private',
+                target: normalizeSimpleValue(raw?.target) || raw?.target,
+                promptTemplate: normalizeTemplateForPatch(raw?.promptTemplate),
+                isCommentBlocked: !!raw?.isCommentBlocked,
+                startingSets,
+                shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw.shortcutCommands : [],
+                defaultCrackerModel: raw?.defaultCrackerModel || 'superchat_2_0',
+                chatType: normalizeSimpleValue(raw?.chatType) || raw?.chatType || 'rolePlaying',
+                genreId: getFirst(raw?.genreId, raw?.genre?._id, raw?.genre?.id),
+                detailDescription: raw?.detailDescription || '',
+                chatModelId: raw?.chatModelId,
+                portraitImageUrl: getPortraitUrl(raw),
+                situationImageVersion: 'v2',
+                creatorRecommendedMaxOutput: raw?.creatorRecommendedMaxOutput,
+                customPrompt: raw?.customPrompt || '',
+                isMovingPortraitImage: !!(raw?.isMovingPortraitImage || raw?.profileImage?.gif),
+                expectedBaseSnapshotId: raw?.snapshotId
+            }),
+            totalAdded
+        };
     }
 
     // ─────────── 메인 실행 ───────────
@@ -681,26 +745,29 @@
             toast(`투명 이미지를 빈칸 ${totalGaps}개에 업로드 중...`, 10000);
             const uploadResult = await uploadGapsWithTransparent(raw, storyId, gapsPerSet, blob);
 
-            // 5. 업로드 후 스토리 재조회 (업로드된 이미지가 반영된 데이터)
+            // 5. 업로드 후 스토리 재조회
             toast('서버 반영 확인 중...', 3000);
-            await new Promise(r => setTimeout(r, 2000)); // 추가 대기
+            await new Promise(r => setTimeout(r, 2000));
             const freshDetail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 재조회');
             const freshRaw = freshDetail?.data || raw;
 
-            // 6. 재조회 데이터로 빈칸 재확인 (로그용)
-            const remainingGaps = findGapsPerSet(freshRaw);
-            const remainingTotal = remainingGaps.reduce((sum, g) => sum + g.gaps.length, 0);
-            console.log(`${LOG} 업로드 후 남은 빈칸: ${remainingTotal} (원래 ${totalGaps})`);
-
-            // 7. ★ 무조건 PATCH — 업로드만으로는 저장되지 않음
-            toast('스토리 저장(PATCH) 중...', 5000);
-            const payload = buildPatchPayload(freshRaw);
+            // 6. ★ 업로드된 URL을 빈칸에 채워서 PATCH 페이로드 만들기
+            const { payload, totalAdded } = buildPatchPayload(freshRaw, uploadResult.uploadedUrlMap);
 
             console.log(`${LOG} PATCH payload 요약`, {
                 storyId,
+                totalAdded,
                 startingSetsCount: payload?.startingSets?.length,
                 situationImagesCount: payload?.startingSets?.map(s => s?.situationImages?.length)
             });
+
+            if (totalAdded <= 0) {
+                toast('채울 빈칸이 없거나 업로드 URL 매칭에 실패했어요.', 4200);
+                return;
+            }
+
+            // 7. ★ 무조건 PATCH
+            toast(`빈칸 ${totalAdded}개를 채워서 저장 중...`, 5000);
 
             // PATCH 재시도
             let patchSuccess = false;
@@ -722,7 +789,7 @@
             }
 
             if (patchSuccess) {
-                toast(`✓ 완료!\n빈 조합 ${totalGaps}개를 투명 이미지로 채우고 저장했어요.`, 5600);
+                toast(`✓ 완료!\n빈 조합 ${totalAdded}개를 투명 이미지로 채우고 저장했어요.`, 5600);
             }
         } catch (err) {
             console.error(`${LOG} 실패`, err);
@@ -799,7 +866,7 @@
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.8.1`);
+        console.log(`${LOG} 로드 완료 v1.8.2`);
     }
 
     if (document.readyState === 'loading') {
