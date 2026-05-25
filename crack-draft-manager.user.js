@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      2.1.0
+// @version      2.2.0
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -363,6 +363,74 @@
         return filled;
     }
 
+    function sanitizeForPatch(raw) {
+        // 서버가 까다롭게 체크하는 필드들을 정리
+        const str = (v, maxLen) => {
+            if (v === null || v === undefined) return '';
+            const s = typeof v === 'string' ? v : String(v);
+            return maxLen ? s.slice(0, maxLen) : s;
+        };
+
+        const VALID_MODELS = ['gpt4', 'gpt4o', 'gpt4o-mini', 'claude', 'superchat', 'superchat_2_0'];
+        let model = str(raw?.model).toLowerCase();
+        if (!VALID_MODELS.some(m => model.includes(m))) model = 'superchat_2_0';
+
+        const VALID_CHAT_TYPES = ['rolePlaying', 'chatBot', 'storyGame'];
+        let chatType = raw?.chatType;
+        if (typeof chatType === 'object') chatType = chatType?._id || chatType?.id || chatType?.name;
+        if (!VALID_CHAT_TYPES.includes(chatType)) chatType = 'rolePlaying';
+
+        const payload = {
+            name: str(raw?.name, 30) || '복원된 스토리',
+            description: str(raw?.description, 500) || '복원된 스토리',
+            simpleDescription: str(raw?.simpleDescription, 30) || '',
+            detailDescription: str(raw?.detailDescription, 1000) || '',
+            storyDetails: str(raw?.storyDetails) || '',
+            customPrompt: str(raw?.customPrompt) || '',
+            model,
+            chatType,
+            visibility: 'private',
+            promptTemplate: str(raw?.promptTemplate) || 'custom',
+            isCommentBlocked: !!raw?.isCommentBlocked,
+            defaultCrackerModel: str(raw?.defaultCrackerModel) || 'superchat_2_0',
+            tags: Array.isArray(raw?.tags) ? raw.tags : [],
+            chatExamples: Array.isArray(raw?.chatExamples) ? raw.chatExamples : [],
+            shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw.shortcutCommands : [],
+            situationImageVersion: raw?.situationImageVersion || 'v2'
+        };
+
+        // startingSets 정리
+        if (Array.isArray(raw?.startingSets) && raw.startingSets.length) {
+            payload.startingSets = raw.startingSets.map(set => ({
+                name: str(set?.name, 30) || '기본 설정',
+                initialMessages: Array.isArray(set?.initialMessages) ? set.initialMessages : [],
+                situationPrompt: str(set?.situationPrompt) || '',
+                replySuggestions: Array.isArray(set?.replySuggestions) ? set.replySuggestions : [],
+                situationImages: Array.isArray(set?.situationImages) ? set.situationImages : [],
+                keywordBook: Array.isArray(set?.keywordBook) ? set.keywordBook : [],
+                parameters: Array.isArray(set?.parameters) ? set.parameters : [],
+                imageMatrix: set?.imageMatrix || {},
+                ...(set?.baseSetId ? { baseSetId: set.baseSetId } : {}),
+                ...(set?.playGuide ? { playGuide: str(set.playGuide) } : {})
+            }));
+        }
+
+        // 선택 필드들 (있으면 넣고, 없으면 안 넣음)
+        const genreId = raw?.genreId || raw?.genre?._id || raw?.genre?.id;
+        if (genreId && typeof genreId === 'string') payload.genreId = genreId;
+
+        const portrait = raw?.portraitImageUrl || raw?.portraitImage?.origin || raw?.profileImage?.origin;
+        if (portrait && typeof portrait === 'string' && portrait.startsWith('http')) {
+            payload.portraitImageUrl = portrait;
+        }
+
+        if (raw?.creatorRecommendedMaxOutput) {
+            payload.creatorRecommendedMaxOutput = raw.creatorRecommendedMaxOutput;
+        }
+
+        return payload;
+    }
+
     async function loadFromDraft(draft) {
         toast(`"${draft.name}" 불러오는 중...`, 3000);
 
@@ -389,9 +457,9 @@
             for (const url of [`${API_BASE}/stories`, `${API_BASE}/stories/v2`]) {
                 try {
                     createRes = await apiFetch('POST', url, {
-                        name: data.name || '복원된 스토리',
-                        description: data.description || '',
-                        chatType: data.chatType || 'rolePlaying'
+                        name: (data.name || '복원된 스토리').slice(0, 30),
+                        description: (data.description || '복원').slice(0, 500),
+                        chatType: 'rolePlaying'
                     }, `생성`);
                     if (createRes?.data?._id) break;
                 } catch (err) {
@@ -405,12 +473,14 @@
             // PATCH
             toast('데이터 채우는 중...', 5000);
 
+            const patchPayload = sanitizeForPatch(data);
+
             try {
                 const newDetail = await apiFetch('GET', `${API_BASE}/stories/me/${newId}`, undefined, '조회');
                 const nr = newDetail?.data;
-                if (nr?.snapshotId) data.expectedBaseSnapshotId = nr.snapshotId;
-                if (nr?.startingSets?.length && data.startingSets?.length) {
-                    data.startingSets.forEach((set, i) => {
+                if (nr?.snapshotId) patchPayload.expectedBaseSnapshotId = nr.snapshotId;
+                if (nr?.startingSets?.length && patchPayload.startingSets?.length) {
+                    patchPayload.startingSets.forEach((set, i) => {
                         if (nr.startingSets[i]) {
                             set.baseSetId = nr.startingSets[i].baseSetId || nr.startingSets[i]._id;
                         }
@@ -418,16 +488,18 @@
                 }
             } catch (_) {}
 
-            data.visibility = 'private';
+            console.log(`${LOG} 복원 PATCH`, { newId, keys: Object.keys(patchPayload) });
 
             for (const url of [`${API_BASE}/stories/${newId}/v2`, `${API_BASE}/stories/${newId}`]) {
                 try {
-                    await apiFetch('PATCH', url, data, 'PATCH');
-                    toast(`✓ "${draft.name}" 복원 완료!\n에디터로 이동합니다...`, 3000);
+                    await apiFetch('PATCH', url, patchPayload, 'PATCH');
+                    toast(`✓ "${draft.name}" 복원 완료!\n/my에서 확인해주세요.`, 3000);
                     setTimeout(() => { location.href = `/my`; }, 1500);
                     return;
                 } catch (err) {
-                    if (err?.status === 404 || err?.status === 405 || err?.status === 400) continue;
+                    console.warn(`${LOG} PATCH 실패 ${url}`, err?.message);
+                    if (err?.status === 404 || err?.status === 405) continue;
+                    if (err?.status === 400) continue;
                     throw err;
                 }
             }
@@ -571,7 +643,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v2.1.0`);
+        console.log(`${LOG} 로드 완료 v2.2.0`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
