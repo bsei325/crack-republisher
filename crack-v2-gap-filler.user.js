@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.7.0
+// @version      1.8.0
 // @author       me
-// @description  GitHub 투명 이미지를 크랙에 자동 업로드한 뒤 v2 이미지 배치표 빈칸을 자동 채움 (완료 확인 포함)
+// @description  v2 이미지 배치표 빈 조합에 투명 이미지를 개별 업로드 (각 빈칸별 정확한 category/situation)
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @updateURL    https://raw.githubusercontent.com/bsei325/crack-republisher/main/crack-v2-gap-filler.user.js
@@ -16,14 +16,8 @@
     const API_BASE = 'https://crack-api.wrtn.ai/crack-api';
     const LOG = '[v2 빈칸 채우기]';
 
-    // GitHub에 올려둔 투명 strip 이미지. 실패하면 내장된 투명 strip PNG로 대체한다.
     const GITHUB_TRANSPARENT_STRIP_URL = 'https://raw.githubusercontent.com/bsei325/crack-republisher/main/transparent-strip-2000x4.png';
-    const TRANSPARENT_UPLOAD_CATEGORY = '투명';
-    const TRANSPARENT_UPLOAD_SITUATION = '빈칸';
     const BUILTIN_TRANSPARENT_STRIP_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAB9AAAAAECAYAAADWMKTOAAAAQUlEQVR42u3ZQQEAIACEMLR/5zOIWwS+nG0BAAAAAAAAwO+uBAAAAAAAAABgoAMAAAAAAABAZaADAAAAAAAAQFUPFhYDBYINOjAAAAAASUVORK5CYII=';
-
-    // 외부 이미지 URL은 크랙 서버가 막을 수 있어서 사용하지 않는다.
-    // 스토리 안에 이미 업로드되어 있는 투명/공백/strip 이미지를 자동 감지해서 그 URL을 재사용한다.
 
     GM_addStyle(`
         .vgf-toast {
@@ -160,10 +154,8 @@
 
     function extractDeepPrimitive(value, preferredKeys = [], depth = 0) {
         if (depth > 4 || value === undefined || value === null) return '';
-
         const direct = primitiveString(value);
         if (direct) return direct;
-
         if (Array.isArray(value)) {
             for (const item of value) {
                 const got = extractDeepPrimitive(item, preferredKeys, depth + 1);
@@ -171,40 +163,24 @@
             }
             return '';
         }
-
         if (typeof value === 'object') {
             const keys = [
                 ...preferredKeys,
-                'name',
-                'keyword',
-                'title',
-                'label',
-                'value',
-                'text',
-                'displayName',
-                'displayText',
-                'situation',
-                'category',
-                'situationName',
-                'categoryName',
-                'situationKeyword',
-                'categoryKeyword',
-                'imageKeyword',
-                'key'
+                'name', 'keyword', 'title', 'label', 'value', 'text',
+                'displayName', 'displayText', 'situation', 'category',
+                'situationName', 'categoryName', 'situationKeyword',
+                'categoryKeyword', 'imageKeyword', 'key'
             ];
-
             for (const key of keys) {
                 if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
                 const got = extractDeepPrimitive(value[key], preferredKeys, depth + 1);
                 if (got) return got;
             }
-
             for (const v of Object.values(value)) {
                 const got = extractDeepPrimitive(v, preferredKeys, depth + 1);
                 if (got) return got;
             }
         }
-
         return '';
     }
 
@@ -216,22 +192,13 @@
     function trimUniqueLabel(label, fallback, used) {
         let s = extractV2Label(label, fallback).trim();
         if (isBadObjectString(s)) s = fallback || '기본';
-
         let base = s.slice(0, 10);
         if (!base) base = (fallback || '기본').slice(0, 10);
-
-        if (!used.has(base)) {
-            used.add(base);
-            return base;
-        }
-
+        if (!used.has(base)) { used.add(base); return base; }
         for (let n = 2; n < 1000; n++) {
             const suffix = String(n);
             const candidate = `${base.slice(0, Math.max(1, 10 - suffix.length))}${suffix}`;
-            if (!used.has(candidate)) {
-                used.add(candidate);
-                return candidate;
-            }
+            if (!used.has(candidate)) { used.add(candidate); return candidate; }
         }
         return base;
     }
@@ -244,13 +211,10 @@
 
     function extractImageUrlFromValue(value) {
         if (!value) return '';
-
         if (typeof value === 'string') {
             const s = value.trim();
-            // 크랙 PATCH는 blob/data/raw가 아니라 업로드 완료된 http(s) URL만 안정적으로 받는다.
             return /^https?:\/\//i.test(s) ? s : '';
         }
-
         if (Array.isArray(value)) {
             for (const item of value) {
                 const got = extractImageUrlFromValue(item);
@@ -258,39 +222,21 @@
             }
             return '';
         }
-
         if (typeof value === 'object') {
-            const keys = [
-                'imageUrl',
-                'url',
-                'origin',
-                'original',
-                'src',
-                'path',
-                'fileUrl',
-                'downloadUrl',
-                'thumbnailUrl'
-            ];
-
+            const keys = ['imageUrl', 'url', 'origin', 'original', 'src', 'path', 'fileUrl', 'downloadUrl', 'thumbnailUrl'];
             for (const key of keys) {
                 if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
                 const got = extractImageUrlFromValue(value[key]);
                 if (got) return got;
             }
         }
-
         return '';
     }
 
     function extractSituationImageUrl(img) {
         return extractImageUrlFromValue(
-            img?.imageUrl ||
-            img?.image ||
-            img?.imageFile ||
-            img?.file ||
-            img?.uploadedImage ||
-            img?.resource ||
-            img?.url
+            img?.imageUrl || img?.image || img?.imageFile || img?.file ||
+            img?.uploadedImage || img?.resource || img?.url
         );
     }
 
@@ -316,7 +262,6 @@
             if (!catMap.has(key)) catMap.set(key, trimUniqueLabel(key, `분류${catMap.size + 1}`, catUsed));
             return catMap.get(key);
         }
-
         function getSit(raw, idx) {
             const key = extractV2Label(raw, `상황${idx + 1}`, ['keyword', 'name', 'situation', 'label']);
             if (!sitMap.has(key)) sitMap.set(key, trimUniqueLabel(key, `상황${sitMap.size + 1}`, sitUsed));
@@ -336,10 +281,8 @@
             .map((img, idx) => {
                 const imageUrl = extractSituationImageUrl(img);
                 if (!imageUrl) return null;
-
                 const rawCat = extractV2Label(img?.category, '', ['name', 'category', 'label', 'keyword']);
                 const rawSit = extractV2Label(img?.situation, '', ['keyword', 'name', 'situation', 'label']);
-
                 return compactObject({
                     situation: rawSit ? getSit(rawSit, idx) : defaultSituation,
                     keyword: trimKeyword(img?.keyword, ''),
@@ -361,43 +304,244 @@
         };
     }
 
-    function fillMissingCellsWithTransparent(set, placeholderUrl) {
-        const normalized = normalizeV2SetLabels(set);
+    // ─────────── 빈 조합 찾기 ───────────
 
-        const categories = normalized.imageMatrix.categories;
-        const situations = normalized.imageMatrix.situations;
-        const images = [...normalized.situationImages];
+    function getBaseSetId(set) {
+        return getFirst(set?.baseSetId, set?.setId, set?._id, set?.id);
+    }
 
-        const existing = new Set();
-        for (const img of images) {
-            const cat = img?.category ? String(img.category).slice(0, 10) : '';
-            const sit = img?.situation ? String(img.situation).slice(0, 10) : '';
-            if (cat && sit) existing.add(`${cat}|||${sit}`);
-        }
+    function findGapsPerSet(raw) {
+        const result = [];
+        const sets = Array.isArray(raw?.startingSets) ? raw.startingSets : [];
 
-        let added = 0;
-        for (const category of categories) {
-            for (const situation of situations) {
-                const key = `${category}|||${situation}`;
-                if (existing.has(key)) continue;
+        for (const set of sets) {
+            const baseSetId = getBaseSetId(set);
+            if (!baseSetId) continue;
 
-                images.push({
-                    situation,
-                    keyword: '',
-                    imageUrl: placeholderUrl,
-                    category
-                });
-                existing.add(key);
-                added++;
+            const normalized = normalizeV2SetLabels(set);
+            const categories = normalized.imageMatrix.categories;
+            const situations = normalized.imageMatrix.situations;
+
+            const existing = new Set();
+            for (const img of normalized.situationImages) {
+                const cat = img?.category ? String(img.category).slice(0, 10) : '';
+                const sit = img?.situation ? String(img.situation).slice(0, 10) : '';
+                if (cat && sit) existing.add(`${cat}|||${sit}`);
+            }
+
+            const gaps = [];
+            for (const category of categories) {
+                for (const situation of situations) {
+                    if (!existing.has(`${category}|||${situation}`)) {
+                        gaps.push({ category, situation });
+                    }
+                }
+            }
+
+            if (gaps.length > 0) {
+                result.push({ baseSetId, setName: set?.name || '기본', gaps });
             }
         }
 
-        return {
-            imageMatrix: normalized.imageMatrix,
-            situationImages: images,
-            added
-        };
+        return result;
     }
+
+    // ─────────── 투명 이미지 준비 ───────────
+
+    function base64ToBlob(base64, mimeType = 'image/png') {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mimeType });
+    }
+
+    async function getTransparentStripBlob() {
+        try {
+            const res = await fetch(`${GITHUB_TRANSPARENT_STRIP_URL}?t=${Date.now()}`, {
+                method: 'GET', cache: 'no-store', mode: 'cors'
+            });
+            if (res.ok) {
+                const blob = await res.blob();
+                if (blob && blob.size > 0) {
+                    console.log(`${LOG} GitHub 투명 이미지 사용`, { size: blob.size });
+                    return blob.type ? blob : new Blob([blob], { type: 'image/png' });
+                }
+            }
+        } catch (e) {
+            console.warn(`${LOG} GitHub fetch 실패, 내장 이미지 사용`, e);
+        }
+        const fallback = base64ToBlob(BUILTIN_TRANSPARENT_STRIP_PNG_BASE64, 'image/png');
+        console.log(`${LOG} 내장 투명 이미지 사용`, { size: fallback.size });
+        return fallback;
+    }
+
+    // ─────────── S3 업로드 ───────────
+
+    async function putToS3(presignedUrl, blob) {
+        // 시도 1: Content-Type 포함
+        try {
+            const res = await fetch(presignedUrl, {
+                method: 'PUT', mode: 'cors', body: blob,
+                headers: { 'Content-Type': 'image/png' }
+            });
+            if (res.ok) return true;
+        } catch (_) {}
+
+        // 시도 2: Content-Type 없이
+        try {
+            const res = await fetch(presignedUrl, {
+                method: 'PUT', mode: 'cors', body: blob
+            });
+            if (res.ok) return true;
+        } catch (_) {}
+
+        return false;
+    }
+
+    // ─────────── 진행 상황 폴링 ───────────
+
+    async function pollBulkProgress(bulkId, maxWaitSec = 30) {
+        const pollUrl = `${API_BASE}/situation-images/presigned-urls/bulk/${bulkId}`;
+        const start = Date.now();
+
+        for (let i = 0; i < 15; i++) {
+            const elapsed = (Date.now() - start) / 1000;
+            if (elapsed > maxWaitSec) break;
+
+            await new Promise(r => setTimeout(r, 2000));
+
+            try {
+                const res = await apiFetch('GET', pollUrl, undefined, `진행 폴링 ${i + 1}`);
+                const sets = res?.data?.startingSets || [];
+                let allDone = true;
+
+                for (const set of sets) {
+                    const p = set?.progress;
+                    if (p) {
+                        console.log(`${LOG} 진행: ${set.baseSetId} → 성공 ${p.successCount}/${p.totalCount}, 에러 ${p.errorCount}`);
+                        if (p.successCount + p.errorCount < p.totalCount) allDone = false;
+                    }
+                }
+
+                if (allDone && sets.length > 0) {
+                    console.log(`${LOG} ✓ 모든 업로드 처리 완료`);
+                    return true;
+                }
+            } catch (err) {
+                console.log(`${LOG} 진행 폴링 ${err?.status || '에러'}`, err?.message);
+                // 404면 이 엔드포인트 없음 → 폴링 포기
+                if (err?.status === 404) {
+                    console.warn(`${LOG} 진행 폴링 엔드포인트 없음, 시간 대기로 전환`);
+                    await new Promise(r => setTimeout(r, 8000));
+                    return false;
+                }
+            }
+        }
+
+        console.warn(`${LOG} 폴링 타임아웃 (${maxWaitSec}초)`);
+        return false;
+    }
+
+    // ─────────── 핵심: 빈칸별 개별 업로드 ───────────
+
+    function getStorySourceId(raw, storyId) {
+        return raw?._id || raw?.id || raw?.sourceId || storyId;
+    }
+
+    async function uploadGapsWithTransparent(raw, storyId, gapsPerSet, blob) {
+        const sourceId = getStorySourceId(raw, storyId);
+        if (!sourceId) throw new Error('sourceId를 못 찾았어요.');
+
+        // 모든 세트의 빈칸을 하나의 bulk 요청에 넣기
+        // uploads = 유니크한 category/situation 조합들
+        const uniqueGaps = new Map();
+        for (const { gaps } of gapsPerSet) {
+            for (const g of gaps) {
+                const key = `${g.category}|||${g.situation}`;
+                if (!uniqueGaps.has(key)) {
+                    uniqueGaps.set(key, { fileType: 'png', category: g.category, situation: g.situation });
+                }
+            }
+        }
+
+        const uploads = Array.from(uniqueGaps.values());
+        const startingSets = gapsPerSet.map(g => ({ baseSetId: g.baseSetId }));
+
+        console.log(`${LOG} 개별 빈칸 업로드 요청`, {
+            sourceId,
+            uploadsCount: uploads.length,
+            setsCount: startingSets.length,
+            uploads: uploads.slice(0, 10) // 처음 10개만 로그
+        });
+
+        const bulkPayload = { sourceId, uploads, startingSets };
+
+        const bulkRes = await apiFetch(
+            'POST',
+            `${API_BASE}/situation-images/presigned-urls/bulk`,
+            bulkPayload,
+            '빈칸별 presigned bulk'
+        );
+
+        console.log(`${LOG} presigned bulk 응답`, {
+            result: bulkRes?.result,
+            bulkId: bulkRes?.data?.bulkId,
+            setsCount: bulkRes?.data?.startingSets?.length
+        });
+
+        const bulkId = bulkRes?.data?.bulkId;
+        const responseSets = bulkRes?.data?.startingSets || [];
+
+        // 모든 presigned URL에 투명 이미지 PUT
+        let putCount = 0;
+        let putFail = 0;
+
+        for (const setResult of responseSets) {
+            const uploadsArr = setResult?.uploads || [];
+            const rejected = setResult?.rejected || [];
+
+            if (rejected.length) {
+                console.warn(`${LOG} 거부된 업로드`, { baseSetId: setResult.baseSetId, rejected });
+            }
+
+            for (const upload of uploadsArr) {
+                const presignedUrl = upload?.url;
+                if (!presignedUrl) continue;
+
+                const ok = await putToS3(presignedUrl, blob);
+                if (ok) {
+                    putCount++;
+                } else {
+                    putFail++;
+                    console.error(`${LOG} S3 PUT 실패`, {
+                        category: upload?.category,
+                        situation: upload?.situation
+                    });
+                }
+            }
+        }
+
+        console.log(`${LOG} S3 PUT 결과: 성공 ${putCount}, 실패 ${putFail}`);
+
+        if (putCount === 0) {
+            throw new Error('S3 업로드가 전부 실패했어요.');
+        }
+
+        // 서버 처리 대기 + 폴링
+        if (bulkId) {
+            toast(`S3 업로드 ${putCount}개 완료, 서버 처리 대기 중...`, 8000);
+            await pollBulkProgress(bulkId, 30);
+        } else {
+            toast('서버 처리 대기 중...', 5000);
+            await new Promise(r => setTimeout(r, 8000));
+        }
+
+        return { putCount, putFail, bulkId };
+    }
+
+    // ─────────── PATCH용 빌더 (이전과 동일) ───────────
 
     function buildKeywordBook(kb) {
         if (!Array.isArray(kb)) return [];
@@ -410,21 +554,14 @@
 
     function buildParam(p) {
         const r = {
-            name: p?.name,
-            colorHexCode: p?.colorHexCode,
-            iconUrl: p?.iconUrl,
-            initialValue: p?.initialValue,
-            min: p?.min,
-            max: p?.max,
-            prompt: p?.prompt,
-            unit: p?.unit
+            name: p?.name, colorHexCode: p?.colorHexCode, iconUrl: p?.iconUrl,
+            initialValue: p?.initialValue, min: p?.min, max: p?.max,
+            prompt: p?.prompt, unit: p?.unit
         };
         if (Array.isArray(p?.levels) && p.levels.length) {
             r.levels = p.levels.map(l => ({
-                name: l?.name,
-                levelMinValue: l?.levelMinValue,
-                levelMaxValue: l?.levelMaxValue,
-                levelPrompt: l?.levelPrompt
+                name: l?.name, levelMinValue: l?.levelMinValue,
+                levelMaxValue: l?.levelMaxValue, levelPrompt: l?.levelPrompt
             }));
         }
         return compactObject(r);
@@ -433,14 +570,13 @@
     function normalizeModelForPatch(model) {
         if (!model) return undefined;
         const s = String(model);
-        if (s === s.toUpperCase()) return s.toLowerCase();
-        return s;
+        return s === s.toUpperCase() ? s.toLowerCase() : s;
     }
 
-    function normalizeTemplateForPatch(promptTemplate) {
-        if (!promptTemplate) return 'custom';
-        if (typeof promptTemplate === 'string') return promptTemplate;
-        return promptTemplate.template || promptTemplate.name || 'custom';
+    function normalizeTemplateForPatch(pt) {
+        if (!pt) return 'custom';
+        if (typeof pt === 'string') return pt;
+        return pt.template || pt.name || 'custom';
     }
 
     function normalizeSimpleValue(value) {
@@ -458,49 +594,25 @@
         );
     }
 
-    function getBaseSetId(set) {
-        return getFirst(set?.baseSetId, set?.setId, set?._id, set?.id);
-    }
-
-    function buildPatchStartingSet(set, placeholderUrl) {
-        const filled = fillMissingCellsWithTransparent(set, placeholderUrl);
-
-        const out = compactObject({
-            baseSetId: getBaseSetId(set),
-            name: set?.name || '기본 설정',
-            initialMessages: Array.isArray(set?.initialMessages) ? set.initialMessages : [],
-            situationPrompt: set?.situationPrompt || '',
-            replySuggestions: Array.isArray(set?.replySuggestions) ? set.replySuggestions : [],
-            situationImages: filled.situationImages,
-            keywordBook: buildKeywordBook(set?.keywordBook),
-            parameters: Array.isArray(set?.parameters) ? set.parameters.map(buildParam) : [],
-            imageMatrix: filled.imageMatrix
-        });
-
-        if (typeof set?.playGuide === 'string' && set.playGuide.trim()) {
-            out.playGuide = set.playGuide;
-        }
-
-        return { set: out, added: filled.added };
-    }
-
-    function buildPatchPayload(raw, placeholderUrlByBaseSetId) {
-        const fallbackUrl = placeholderUrlByBaseSetId instanceof Map
-            ? (placeholderUrlByBaseSetId.get('__default') || Array.from(placeholderUrlByBaseSetId.values())[0])
-            : placeholderUrlByBaseSetId;
-
-        const setResults = (Array.isArray(raw?.startingSets) ? raw.startingSets : [])
+    function buildPatchPayload(raw) {
+        const startingSets = (Array.isArray(raw?.startingSets) ? raw.startingSets : [])
             .map(set => {
-                const baseSetId = getBaseSetId(set);
-                const url = placeholderUrlByBaseSetId instanceof Map
-                    ? (placeholderUrlByBaseSetId.get(baseSetId) || fallbackUrl)
-                    : fallbackUrl;
-                return buildPatchStartingSet(set, url);
+                const normalized = normalizeV2SetLabels(set);
+                return compactObject({
+                    baseSetId: getBaseSetId(set),
+                    name: set?.name || '기본 설정',
+                    initialMessages: Array.isArray(set?.initialMessages) ? set.initialMessages : [],
+                    situationPrompt: set?.situationPrompt || '',
+                    replySuggestions: Array.isArray(set?.replySuggestions) ? set.replySuggestions : [],
+                    situationImages: normalized.situationImages,
+                    keywordBook: buildKeywordBook(set?.keywordBook),
+                    parameters: Array.isArray(set?.parameters) ? set.parameters.map(buildParam) : [],
+                    imageMatrix: normalized.imageMatrix,
+                    ...(typeof set?.playGuide === 'string' && set.playGuide.trim() ? { playGuide: set.playGuide } : {})
+                });
             });
-        const startingSets = setResults.map(r => r.set);
-        const added = setResults.reduce((sum, r) => sum + r.added, 0);
 
-        const payload = compactObject({
+        return compactObject({
             name: raw?.name || '스토리',
             description: raw?.description || '설명',
             simpleDescription: raw?.simpleDescription || '간략한 설명',
@@ -526,440 +638,125 @@
             isMovingPortraitImage: !!(raw?.isMovingPortraitImage || raw?.profileImage?.gif),
             expectedBaseSnapshotId: raw?.snapshotId
         });
-
-        return { payload, added };
     }
 
-    
-    function labelLooksTransparent(choice) {
-        return /투명|빈칸|공백|blank|transparent|strip|spacer|empty|틈/i.test(
-            `${choice.combo} ${choice.keyword} ${choice.setName}`
-        );
-    }
+    // ─────────── 메인 실행 ───────────
 
-    function collectExistingImageChoices(raw) {
-        const choices = [];
-        const seen = new Set();
-        const sets = Array.isArray(raw?.startingSets) ? raw.startingSets : [];
-
-        sets.forEach((set, setIndex) => {
-            const normalized = normalizeV2SetLabels(set);
-            (normalized.situationImages || []).forEach((img, imageIndex) => {
-                const imageUrl = extractSituationImageUrl(img);
-                if (!imageUrl) return;
-
-                const category = img.category ? String(img.category).slice(0, 10) : '';
-                const situation = img.situation ? String(img.situation).slice(0, 10) : '';
-                const keyword = img.keyword ? String(img.keyword).slice(0, 10) : '';
-                const combo = `${category}_${situation}`;
-                const dedupe = `${combo}|||${imageUrl}`;
-
-                if (seen.has(dedupe)) return;
-                seen.add(dedupe);
-
-                choices.push({
-                    setName: set?.name || `세트${setIndex + 1}`,
-                    category,
-                    situation,
-                    keyword,
-                    combo,
-                    imageUrl,
-                    setIndex,
-                    imageIndex
-                });
-            });
-        });
-
-        return choices;
-    }
-
-    function getImageSize(url, timeoutMs = 4500) {
-        return new Promise(resolve => {
-            const img = new Image();
-            let done = false;
-
-            const finish = result => {
-                if (done) return;
-                done = true;
-                resolve(result);
-            };
-
-            const timer = setTimeout(() => finish(null), timeoutMs);
-
-            img.onload = () => {
-                clearTimeout(timer);
-                finish({
-                    width: img.naturalWidth || img.width || 0,
-                    height: img.naturalHeight || img.height || 0
-                });
-            };
-            img.onerror = () => {
-                clearTimeout(timer);
-                finish(null);
-            };
-            img.src = url;
-        });
-    }
-
-    async function pickPlaceholderChoiceAuto(raw) {
-        const choices = collectExistingImageChoices(raw);
-        if (!choices.length) return null;
-
-        const labeled = choices.find(labelLooksTransparent);
-        if (labeled) {
-            labeled.detectReason = 'label';
-            return labeled;
-        }
-
-        const inspected = [];
-        for (const choice of choices.slice(0, 120)) {
-            const size = await getImageSize(choice.imageUrl);
-            if (!size || !size.width || !size.height) continue;
-
-            const longSide = Math.max(size.width, size.height);
-            const shortSide = Math.max(1, Math.min(size.width, size.height));
-            const ratio = longSide / shortSide;
-
-            inspected.push({
-                ...choice,
-                width: size.width,
-                height: size.height,
-                ratio
-            });
-        }
-
-        inspected.sort((a, b) => b.ratio - a.ratio);
-
-        const strip = inspected.find(item => {
-            const longSide = Math.max(item.width, item.height);
-            const shortSide = Math.min(item.width, item.height);
-            return longSide >= 80 && shortSide <= 30 && item.ratio >= 8;
-        });
-
-        if (strip) {
-            strip.detectReason = 'size';
-            return strip;
-        }
-
-        console.warn(`${LOG} 투명 이미지 자동 감지 실패`, { choices, inspected });
-        return null;
-    }
-
-
-    function base64ToBlob(base64, mimeType = 'image/png') {
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-        }
-        return new Blob([bytes], { type: mimeType });
-    }
-
-    async function getTransparentStripBlob() {
-        try {
-            const res = await fetch(`${GITHUB_TRANSPARENT_STRIP_URL}?t=${Date.now()}`, {
-                method: 'GET',
-                cache: 'no-store',
-                mode: 'cors'
-            });
-            if (res.ok) {
-                const blob = await res.blob();
-                if (blob && blob.size > 0) {
-                    console.log(`${LOG} GitHub 투명 이미지 사용`, { size: blob.size, type: blob.type });
-                    return blob.type ? blob : new Blob([blob], { type: 'image/png' });
-                }
-            }
-            console.warn(`${LOG} GitHub 투명 이미지 fetch 실패`, res.status);
-        } catch (e) {
-            console.warn(`${LOG} GitHub 투명 이미지 fetch 에러, 내장 이미지 사용`, e);
-        }
-
-        const fallback = base64ToBlob(BUILTIN_TRANSPARENT_STRIP_PNG_BASE64, 'image/png');
-        console.log(`${LOG} 내장 투명 이미지 사용`, { size: fallback.size, type: fallback.type });
-        return fallback;
-    }
-
-    function getStorySourceId(raw, storyId) {
-        return raw?._id || raw?.id || raw?.sourceId || storyId;
-    }
-
-    function getPatchableStartingSetIds(raw) {
-        const ids = [];
-        const seen = new Set();
-        for (const set of (Array.isArray(raw?.startingSets) ? raw.startingSets : [])) {
-            const baseSetId = getBaseSetId(set);
-            if (!baseSetId || seen.has(baseSetId)) continue;
-            seen.add(baseSetId);
-            ids.push(baseSetId);
-        }
-        return ids;
-    }
-
-    function parsePresignedUploads(bulkResponse) {
-        const map = new Map();
-        const bulkId = bulkResponse?.data?.bulkId || '';
-        const startingSets = Array.isArray(bulkResponse?.data?.startingSets)
-            ? bulkResponse.data.startingSets
-            : [];
-
-        for (const setResult of startingSets) {
-            const baseSetId = setResult?.baseSetId;
-            const upload = Array.isArray(setResult?.uploads) ? setResult.uploads[0] : null;
-            const presignedUrl = upload?.url;
-
-            if (!baseSetId || !presignedUrl) continue;
-
-            map.set(baseSetId, {
-                baseSetId,
-                uploadId: upload?._id,
-                presignedUrl,
-                finalUrl: String(presignedUrl).split('?')[0],
-                category: upload?.category || TRANSPARENT_UPLOAD_CATEGORY,
-                situation: upload?.situation || TRANSPARENT_UPLOAD_SITUATION
-            });
-        }
-
-        return { map, bulkId };
-    }
-
-    async function putToS3PresignedUrl(presignedUrl, blob) {
-        async function attempt(withContentType) {
-            const opts = {
-                method: 'PUT',
-                mode: 'cors',
-                body: blob
-            };
-            if (withContentType) {
-                opts.headers = { 'Content-Type': 'image/png' };
-            }
-
-            const res = await fetch(presignedUrl, opts);
-            if (!res.ok) {
-                let body = '';
-                try { body = await res.text(); } catch (_) {}
-                throw new Error(`S3 PUT 실패 ${res.status} ${body.slice(0, 180)}`);
-            }
-            return res;
-        }
-
-        try {
-            return await attempt(true);
-        } catch (firstErr) {
-            console.warn(`${LOG} Content-Type 포함 PUT 실패, 무헤더로 재시도`, firstErr);
-            return await attempt(false);
-        }
-    }
-
-    async function tryCompleteUpload(bulkId, sourceId, uploadMap) {
-        // 완료 확인 API 후보들을 순서대로 시도
-        const uploadIds = Array.from(uploadMap.values()).map(v => v.uploadId).filter(Boolean);
-        const endpoints = [
-            {
-                url: `${API_BASE}/situation-images/presigned-urls/bulk/${bulkId}/complete`,
-                method: 'POST',
-                body: { sourceId }
-            },
-            {
-                url: `${API_BASE}/situation-images/bulk/${bulkId}/complete`,
-                method: 'POST',
-                body: { sourceId }
-            },
-            {
-                url: `${API_BASE}/situation-images/presigned-urls/bulk/complete`,
-                method: 'POST',
-                body: { bulkId, sourceId }
-            },
-            {
-                url: `${API_BASE}/situation-images/upload-complete`,
-                method: 'POST',
-                body: { bulkId, sourceId, uploadIds }
-            }
-        ];
-
-        for (const ep of endpoints) {
-            try {
-                const result = await apiFetch(ep.method, ep.url, ep.body, `완료 확인 ${ep.url}`);
-                console.log(`${LOG} ✓ 완료 확인 성공`, { url: ep.url, result });
-                return result;
-            } catch (err) {
-                const status = err?.status || 0;
-                console.log(`${LOG} 완료 확인 시도`, { url: ep.url, status, msg: err?.message });
-                // 404/405 = 이 엔드포인트가 아님, 다음 시도
-                if (status === 404 || status === 405) continue;
-                // 다른 에러면 기록하고 다음
-                continue;
-            }
-        }
-
-        console.warn(`${LOG} 완료 확인 엔드포인트를 못 찾았어요. 지연 후 PATCH 시도합니다.`);
-        return null;
-    }
-
-    async function uploadTransparentToCrack(raw, storyId) {
-        const sourceId = getStorySourceId(raw, storyId);
-        const baseSetIds = getPatchableStartingSetIds(raw);
-
-        if (!sourceId) throw new Error('sourceId를 못 찾았어요.');
-        if (!baseSetIds.length) throw new Error('startingSet baseSetId를 못 찾았어요.');
-
-        const bulkPayload = {
-            sourceId,
-            uploads: [{
-                fileType: 'png',
-                category: TRANSPARENT_UPLOAD_CATEGORY,
-                situation: TRANSPARENT_UPLOAD_SITUATION
-            }],
-            startingSets: baseSetIds.map(baseSetId => ({ baseSetId }))
-        };
-
-        console.log(`${LOG} presigned bulk 요청`, bulkPayload);
-
-        const bulkResponse = await apiFetch(
-            'POST',
-            `${API_BASE}/situation-images/presigned-urls/bulk`,
-            bulkPayload,
-            '투명 이미지 presigned bulk'
-        );
-
-        console.log(`${LOG} presigned bulk 응답`, bulkResponse);
-
-        const { map: uploadMap, bulkId } = parsePresignedUploads(bulkResponse);
-        if (!uploadMap.size) {
-            console.error(`${LOG} presigned bulk 응답 파싱 실패`, bulkResponse);
-            throw new Error('투명 이미지 업로드 URL을 못 받았어요.');
-        }
-
-        console.log(`${LOG} bulkId = ${bulkId}, uploadMap 크기 = ${uploadMap.size}`);
-
-        const blob = await getTransparentStripBlob();
-        const finalUrlByBaseSetId = new Map();
-
-        for (const [baseSetId, info] of uploadMap.entries()) {
-            console.log(`${LOG} S3 PUT 시작`, {
-                baseSetId,
-                uploadId: info.uploadId,
-                finalUrl: info.finalUrl
-            });
-
-            await putToS3PresignedUrl(info.presignedUrl, blob);
-            console.log(`${LOG} S3 PUT 성공`, { baseSetId });
-            finalUrlByBaseSetId.set(baseSetId, info.finalUrl);
-        }
-
-        if (!finalUrlByBaseSetId.size) {
-            throw new Error('투명 이미지 업로드에 실패했어요.');
-        }
-
-        // ★ 핵심: S3 업로드 후 크랙 서버에 완료 확인 요청
-        if (bulkId) {
-            toast('업로드 완료 확인 중...', 3000);
-            await tryCompleteUpload(bulkId, sourceId, uploadMap);
-        }
-
-        // 서버 처리 시간 대기
-        console.log(`${LOG} 서버 처리 대기 3초...`);
-        await new Promise(r => setTimeout(r, 3000));
-
-        finalUrlByBaseSetId.set('__default', Array.from(finalUrlByBaseSetId.values())[0]);
-        return finalUrlByBaseSetId;
-    }
-
-    async function patchWithRetry(storyId, payload, maxTries = 5) {
-        let lastErr = null;
-
-        for (let attempt = 1; attempt <= maxTries; attempt++) {
-            try {
-                return await apiFetch('PATCH', `${API_BASE}/stories/${storyId}/v2`, payload, `투명 빈칸 PATCH ${attempt}`);
-            } catch (err) {
-                lastErr = err;
-                const msg = String(err?.message || '');
-                const retryable =
-                    msg.includes('업로드') ||
-                    msg.includes('완료') ||
-                    msg.includes('상황 이미지') ||
-                    err?.status === 400;
-
-                if (!retryable || attempt === maxTries) throw err;
-
-                console.warn(`${LOG} PATCH 재시도 대기`, { attempt, message: msg });
-                toast(`업로드 반영 대기 중... (${attempt}/${maxTries})`, 2600);
-                await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-            }
-        }
-
-        throw lastErr || new Error('PATCH 실패');
-    }
-
-async function fillStoryGaps(storyId) {
+    async function fillStoryGaps(storyId) {
         toast('v2 이미지 배치표 확인 중...');
         try {
+            // 1. 스토리 조회
             const detail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 조회');
             const raw = detail?.data;
-
             if (!raw) throw new Error('스토리 데이터를 못 가져왔어요.');
             if (raw.situationImageVersion !== 'v2') {
                 toast('이 스토리는 v2 이미지 배치표가 아니에요.', 3600);
                 return;
             }
 
-            toast('투명 이미지를 크랙에 자동 업로드 중...', 5000);
-            const placeholderUrlByBaseSetId = await uploadTransparentToCrack(raw, storyId);
+            // 2. 빈 조합 찾기
+            const gapsPerSet = findGapsPerSet(raw);
+            const totalGaps = gapsPerSet.reduce((sum, g) => sum + g.gaps.length, 0);
 
-            // ★ 업로드 후 스토리를 다시 조회 (서버 상태 반영)
-            toast('업로드 반영 확인 중...', 3000);
-            const freshDetail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 재조회');
-            const freshRaw = freshDetail?.data || raw;
-
-            const { payload, added } = buildPatchPayload(freshRaw, placeholderUrlByBaseSetId);
-
-            console.log(`${LOG} PATCH payload`, {
-                storyId,
-                added,
-                placeholderUrlByBaseSetId: Object.fromEntries(placeholderUrlByBaseSetId),
-                startingSetsCount: payload?.startingSets?.length,
-                situationImagesCount: payload?.startingSets?.map(s => s?.situationImages?.length)
+            console.log(`${LOG} 빈 조합 분석`, {
+                sets: gapsPerSet.map(g => ({
+                    baseSetId: g.baseSetId,
+                    setName: g.setName,
+                    gapsCount: g.gaps.length,
+                    gaps: g.gaps.slice(0, 5) // 처음 5개만
+                })),
+                totalGaps
             });
 
-            if (added <= 0) {
+            if (totalGaps === 0) {
                 toast('채울 빈칸이 없어요.\n이미 모든 조합에 이미지가 있어요.', 4200);
                 return;
             }
 
-            toast(`빈칸 ${added}개를 투명 이미지로 채우는 중...`, 5000);
-            await patchWithRetry(storyId, payload, 5);
+            // 3. 투명 이미지 준비
+            toast(`빈 조합 ${totalGaps}개 발견! 투명 이미지 준비 중...`, 4000);
+            const blob = await getTransparentStripBlob();
 
-            toast(`✓ 완료!\nGitHub 투명 이미지 업로드 후 빈 조합 ${added}개를 자동으로 채웠어요.`, 5600);
+            // 4. ★ 각 빈칸의 정확한 category/situation으로 개별 업로드
+            toast(`투명 이미지를 빈칸 ${totalGaps}개에 업로드 중...`, 10000);
+            const uploadResult = await uploadGapsWithTransparent(raw, storyId, gapsPerSet, blob);
+
+            // 5. 업로드 후 스토리 재조회
+            toast('서버 반영 확인 중...', 3000);
+            const freshDetail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 재조회');
+            const freshRaw = freshDetail?.data;
+
+            // 6. 재조회한 데이터로 빈칸 재확인
+            const remainingGaps = findGapsPerSet(freshRaw || raw);
+            const remainingTotal = remainingGaps.reduce((sum, g) => sum + g.gaps.length, 0);
+
+            console.log(`${LOG} 업로드 후 남은 빈칸: ${remainingTotal} (원래 ${totalGaps})`);
+
+            if (remainingTotal === 0) {
+                // ★ 업로드만으로 빈칸이 채워졌다! PATCH 불필요
+                toast(`✓ 완료!\n빈 조합 ${totalGaps}개를 투명 이미지로 채웠어요.`, 5600);
+                return;
+            }
+
+            // 7. 아직 빈칸이 남아있으면 PATCH 시도
+            console.log(`${LOG} 남은 빈칸 ${remainingTotal}개, PATCH 시도...`);
+            toast(`남은 빈칸 ${remainingTotal}개를 PATCH로 마무리 중...`, 5000);
+
+            const payload = buildPatchPayload(freshRaw || raw);
+
+            console.log(`${LOG} PATCH payload 요약`, {
+                storyId,
+                startingSetsCount: payload?.startingSets?.length,
+                situationImagesCount: payload?.startingSets?.map(s => s?.situationImages?.length)
+            });
+
+            // PATCH 재시도
+            let patchSuccess = false;
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                    await apiFetch('PATCH', `${API_BASE}/stories/${storyId}/v2`, payload, `PATCH ${attempt}`);
+                    patchSuccess = true;
+                    break;
+                } catch (err) {
+                    const msg = String(err?.message || '');
+                    console.warn(`${LOG} PATCH 재시도 ${attempt}`, msg);
+                    if (attempt < 5 && (msg.includes('업로드') || msg.includes('완료') || err?.status === 400)) {
+                        toast(`서버 처리 대기 중... (${attempt}/5)`, 3000);
+                        await new Promise(r => setTimeout(r, 3000 * attempt));
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+
+            if (patchSuccess) {
+                toast(`✓ 완료!\n빈 조합 ${totalGaps}개를 투명 이미지로 채웠어요.`, 5600);
+            }
         } catch (err) {
             console.error(`${LOG} 실패`, err);
             const errMsg = String(err?.message || err).slice(0, 240);
-            const hint = errMsg.includes('업로드') ?
-                '\n\n💡 Console에서 "[v2 빈칸 채우기] 완료 확인 시도" 로그를 확인해주세요.' : '';
-            toast('실패 ㅠㅠ\n' + errMsg + hint, 8000);
+            toast('실패 ㅠㅠ\n' + errMsg, 8000);
         }
     }
+
+    // ─────────── UI / 메뉴 삽입 ───────────
 
     function getStoryInfoFromMenu() {
         const popper = document.querySelector('div[data-radix-popper-content-wrapper]');
         if (!popper || !popper.childNodes[0]) return null;
-
         try {
             const el = popper.childNodes[0];
             const pk = Object.keys(el).find(k => k.startsWith('__reactProps'));
             if (!pk) return null;
-
             const children = [].concat(el[pk]?.children || []);
             for (const ch of children) {
                 if (ch?.props?.content?.sourceId) {
-                    return {
-                        id: ch.props.content.sourceId,
-                        type: ch.props.content.type || 'story'
-                    };
+                    return { id: ch.props.content.sourceId, type: ch.props.content.type || 'story' };
                 }
             }
         } catch (e) {
             console.warn(`${LOG} story id 추출 실패`, e);
         }
-
         return null;
     }
 
@@ -979,16 +776,12 @@ async function fillStoryGaps(storyId) {
 
     function injectMenu() {
         if (!/^\/my(\/.*)?$/.test(location.pathname)) return;
-
         const popper = document.querySelector('div[data-radix-popper-content-wrapper]');
         if (!popper) return;
-
         const container = popper.querySelector('[role="menu"], [data-radix-menu-content]')
             || popper.childNodes[0]?.childNodes[0];
-
         if (!container || container.hasAttribute(MARKER)) return;
         container.setAttribute(MARKER, 'true');
-
         const info = getStoryInfoFromMenu();
         if (!info) return;
 
@@ -1006,7 +799,7 @@ async function fillStoryGaps(storyId) {
             return;
         }
 
-        container.appendChild(createButton('🧩 GitHub 투명 이미지로 자동 채우기', () => fillStoryGaps(info.id)));
+        container.appendChild(createButton('🧩 빈칸 투명 이미지 자동 채우기', () => fillStoryGaps(info.id)));
     }
 
     function init() {
@@ -1014,7 +807,7 @@ async function fillStoryGaps(storyId) {
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.7.0`);
+        console.log(`${LOG} 로드 완료 v1.8.0`);
     }
 
     if (document.readyState === 'loading') {
