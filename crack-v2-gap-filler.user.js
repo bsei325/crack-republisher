@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.8.0
+// @version      1.8.1
 // @author       me
 // @description  v2 이미지 배치표 빈 조합에 투명 이미지를 개별 업로드 (각 빈칸별 정확한 category/situation)
 // @match        https://crack.wrtn.ai/*
@@ -681,28 +681,20 @@
             toast(`투명 이미지를 빈칸 ${totalGaps}개에 업로드 중...`, 10000);
             const uploadResult = await uploadGapsWithTransparent(raw, storyId, gapsPerSet, blob);
 
-            // 5. 업로드 후 스토리 재조회
+            // 5. 업로드 후 스토리 재조회 (업로드된 이미지가 반영된 데이터)
             toast('서버 반영 확인 중...', 3000);
+            await new Promise(r => setTimeout(r, 2000)); // 추가 대기
             const freshDetail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 재조회');
-            const freshRaw = freshDetail?.data;
+            const freshRaw = freshDetail?.data || raw;
 
-            // 6. 재조회한 데이터로 빈칸 재확인
-            const remainingGaps = findGapsPerSet(freshRaw || raw);
+            // 6. 재조회 데이터로 빈칸 재확인 (로그용)
+            const remainingGaps = findGapsPerSet(freshRaw);
             const remainingTotal = remainingGaps.reduce((sum, g) => sum + g.gaps.length, 0);
-
             console.log(`${LOG} 업로드 후 남은 빈칸: ${remainingTotal} (원래 ${totalGaps})`);
 
-            if (remainingTotal === 0) {
-                // ★ 업로드만으로 빈칸이 채워졌다! PATCH 불필요
-                toast(`✓ 완료!\n빈 조합 ${totalGaps}개를 투명 이미지로 채웠어요.`, 5600);
-                return;
-            }
-
-            // 7. 아직 빈칸이 남아있으면 PATCH 시도
-            console.log(`${LOG} 남은 빈칸 ${remainingTotal}개, PATCH 시도...`);
-            toast(`남은 빈칸 ${remainingTotal}개를 PATCH로 마무리 중...`, 5000);
-
-            const payload = buildPatchPayload(freshRaw || raw);
+            // 7. ★ 무조건 PATCH — 업로드만으로는 저장되지 않음
+            toast('스토리 저장(PATCH) 중...', 5000);
+            const payload = buildPatchPayload(freshRaw);
 
             console.log(`${LOG} PATCH payload 요약`, {
                 storyId,
@@ -730,7 +722,7 @@
             }
 
             if (patchSuccess) {
-                toast(`✓ 완료!\n빈 조합 ${totalGaps}개를 투명 이미지로 채웠어요.`, 5600);
+                toast(`✓ 완료!\n빈 조합 ${totalGaps}개를 투명 이미지로 채우고 저장했어요.`, 5600);
             }
         } catch (err) {
             console.error(`${LOG} 실패`, err);
@@ -807,7 +799,7 @@
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.8.0`);
+        console.log(`${LOG} 로드 완료 v1.8.1`);
     }
 
     if (document.readyState === 'loading') {
