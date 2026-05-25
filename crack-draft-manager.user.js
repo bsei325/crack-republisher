@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      2.5.0
+// @version      3.0.0
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -116,211 +116,74 @@
         return json;
     }
 
-    // ─────── React 내부에서 폼 데이터 추출 ───────
+    // ─────── 임시등록 팝업 (수동 입력) ───────
 
-    // fetch 가로채기 (3차 대안용)
-    let interceptMode = false;
-    let interceptResolve = null;
+    function openSavePopup() {
+        document.querySelectorAll('.ld-overlay').forEach(el => el.remove());
 
-    const _origFetch = window.fetch;
-    window.fetch = async function (url, opts = {}) {
-        if (interceptMode && typeof url === 'string' &&
-            url.includes('/stories') &&
-            (opts.method === 'POST' || opts.method === 'PATCH' || opts.method === 'PUT')) {
-            let body = null;
-            try { body = typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body; } catch (_) {}
-            if (body && (body.name || body.customPrompt || body.startingSets)) {
-                interceptMode = false;
-                if (interceptResolve) interceptResolve(body);
-                return new Response(JSON.stringify({
-                    result: 'SUCCESS', data: { _id: 'local_temp' }
-                }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-            }
-        }
-        return _origFetch.apply(this, arguments);
-    };
+        const overlay = document.createElement('div');
+        overlay.className = 'ld-overlay';
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 
-    function hasStoryKeys(obj) {
-        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return 0;
-        const keys = Object.keys(obj);
-        const storyKeys = ['name', 'customPrompt', 'storyDetails', 'startingSets',
-            'situationImageVersion', 'chatType', 'description', 'promptTemplate',
-            'chatExamples', 'tags', 'simpleDescription', 'detailDescription',
-            'model', 'visibility', 'shortcutCommands', 'defaultCrackerModel',
-            'chatModelId', 'genreId', 'portraitImageUrl', 'isCommentBlocked'];
-        return storyKeys.filter(k => keys.includes(k)).length;
-    }
+        const panel = document.createElement('div');
+        panel.className = 'ld-panel';
+        panel.style.maxWidth = '550px';
 
-    function extractFromReactFiber() {
-        const roots = [
-            document.getElementById('__next'),
-            document.getElementById('root'),
-            document.querySelector('[data-reactroot]'),
-            document.body
-        ].filter(Boolean);
+        panel.innerHTML = `
+            <h2 class="ld-panel-title">💾 임시등록</h2>
+            <div class="ld-panel-sub">에디터에서 복사 → 여기 붙여넣기! (미등록 슬롯 안 씀)</div>
+            <div style="display:flex;flex-direction:column;gap:10px;max-height:55vh;overflow-y:auto;padding:2px">
+                <label style="font-size:13px;font-weight:600">스토리 이름 *</label>
+                <input id="ld-name" style="padding:8px 12px;border:1px solid #ccc;border-radius:8px;font-size:14px" placeholder="에디터에서 이름 복사">
 
-        let bestMatch = null;
-        let bestScore = 0;
+                <label style="font-size:13px;font-weight:600">한줄 소개</label>
+                <input id="ld-simple" style="padding:8px 12px;border:1px solid #ccc;border-radius:8px;font-size:14px" placeholder="짧은 소개 (30자 이하)">
 
-        for (const root of roots) {
-            const fiberKey = Object.keys(root).find(k =>
-                k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance'));
-            if (!fiberKey) continue;
+                <label style="font-size:13px;font-weight:600">스토리 설정 및 정보</label>
+                <textarea id="ld-details" rows="4" style="padding:8px 12px;border:1px solid #ccc;border-radius:8px;font-size:13px;resize:vertical" placeholder="세계관, 설정, 등장인물 등"></textarea>
 
-            function checkCandidate(obj) {
-                if (!obj || typeof obj !== 'object') return;
-                const score = hasStoryKeys(obj);
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestMatch = obj;
+                <label style="font-size:13px;font-weight:600">커스텀 프롬프트</label>
+                <textarea id="ld-prompt" rows="6" style="padding:8px 12px;border:1px solid #ccc;border-radius:8px;font-size:13px;resize:vertical" placeholder="프롬프트 내용"></textarea>
+
+                <label style="font-size:13px;font-weight:600">첫 메시지 (시작 설정)</label>
+                <textarea id="ld-init" rows="3" style="padding:8px 12px;border:1px solid #ccc;border-radius:8px;font-size:13px;resize:vertical" placeholder="첫 번째 메시지"></textarea>
+
+                <label style="font-size:13px;font-weight:600">메모 (자유 메모)</label>
+                <textarea id="ld-memo" rows="2" style="padding:8px 12px;border:1px solid #ccc;border-radius:8px;font-size:13px;resize:vertical" placeholder="나중에 기억할 것들"></textarea>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+                <button id="ld-cancel" class="ld-card-btn del" style="padding:10px 20px">취소</button>
+                <button id="ld-save" class="ld-card-btn restore" style="padding:10px 20px">💾 저장</button>
+            </div>
+        `;
+
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+
+        panel.querySelector('#ld-cancel').addEventListener('click', () => overlay.remove());
+        panel.querySelector('#ld-save').addEventListener('click', () => {
+            const name = panel.querySelector('#ld-name').value.trim();
+            if (!name) { toast('이름을 입력해주세요!', 2500); return; }
+
+            const entry = {
+                id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                name,
+                date: new Date().toISOString(),
+                data: {
+                    name,
+                    simpleDescription: panel.querySelector('#ld-simple').value.trim(),
+                    storyDetails: panel.querySelector('#ld-details').value.trim(),
+                    customPrompt: panel.querySelector('#ld-prompt').value.trim(),
+                    initialMessage: panel.querySelector('#ld-init').value.trim(),
+                    memo: panel.querySelector('#ld-memo').value.trim()
                 }
-            }
+            };
 
-            function walk(fiber, depth) {
-                if (!fiber || depth > 100) return;
-
-                // hooks 체인
-                let hook = fiber.memoizedState;
-                let hi = 0;
-                while (hook && hi < 60) {
-                    const val = hook.memoizedState;
-                    if (val && typeof val === 'object') {
-                        checkCandidate(val);
-                        if (Array.isArray(val) && val[0]) checkCandidate(val[0]);
-                        // 중첩 객체도 체크
-                        if (!Array.isArray(val)) {
-                            for (const v of Object.values(val)) {
-                                if (v && typeof v === 'object' && !Array.isArray(v)) checkCandidate(v);
-                            }
-                        }
-                    }
-                    if (hook.queue?.lastRenderedState) checkCandidate(hook.queue.lastRenderedState);
-                    hook = hook.next;
-                    hi++;
-                }
-
-                // 클래스 컴포넌트
-                if (fiber.stateNode?.state) checkCandidate(fiber.stateNode.state);
-
-                // props
-                if (fiber.memoizedProps) {
-                    checkCandidate(fiber.memoizedProps);
-                    for (const v of Object.values(fiber.memoizedProps)) {
-                        if (v && typeof v === 'object' && !Array.isArray(v)) checkCandidate(v);
-                    }
-                }
-
-                // Context
-                if (fiber.memoizedProps?.value) checkCandidate(fiber.memoizedProps.value);
-                if (fiber.pendingProps?.value) checkCandidate(fiber.pendingProps.value);
-
-                walk(fiber.child, depth + 1);
-                walk(fiber.sibling, depth + 1);
-            }
-
-            walk(root[fiberKey], 0);
-        }
-
-        if (bestMatch && bestScore >= 5) {
-            console.log(`${LOG} React fiber 최적 매칭 (${bestScore}개 키)`, Object.keys(bestMatch));
-            return bestMatch;
-        }
-
-        console.warn(`${LOG} React fiber 매칭 실패 (최고 ${bestScore}개 키)`);
-        return null;
-    }
-
-    function readFormFromDOM() {
-        const data = {};
-        const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-        const textareas = document.querySelectorAll('textarea');
-
-        // 첫 번째 input은 보통 이름
-        if (inputs[0]?.value) data.name = inputs[0].value;
-
-        // textarea 내용 수집
-        textareas.forEach((ta, i) => {
-            if (!ta.value) return;
-            if (i === 0 && !data.storyDetails) data.storyDetails = ta.value;
-            else if (i === 1 && !data.customPrompt) data.customPrompt = ta.value;
+            addDraft(entry);
+            overlay.remove();
+            toast(`✓ 임시등록 완료!\n"${name}" 저장됨 (${loadDrafts().length}개)`, 3500);
+            updateFabCount();
         });
-
-        // select 값들
-        document.querySelectorAll('select').forEach(sel => {
-            if (sel.value) {
-                const label = sel.closest('label, [class*="field"]')?.textContent || '';
-                if (label.includes('템플릿') || label.includes('프롬프트')) data.promptTemplate = sel.value;
-            }
-        });
-
-        return Object.keys(data).length >= 1 ? data : null;
-    }
-
-    // ─────── 임시등록 (저장) ───────
-
-    function findSaveButton() {
-        const buttons = document.querySelectorAll('button, [role="button"]');
-        for (const btn of buttons) {
-            const text = btn.textContent?.trim();
-            if (text === '임시저장' || text === '임시 저장') return btn;
-        }
-        const headerBtns = document.querySelectorAll('header button, nav button, [class*="header"] button');
-        for (const btn of headerBtns) {
-            if (btn.textContent?.includes('임시')) return btn;
-        }
-        return null;
-    }
-
-    async function doLocalSave() {
-        toast('데이터 읽는 중...', 3000);
-
-        // 1차: React 내부에서 직접 읽기
-        let capturedData = extractFromReactFiber();
-
-        // 2차: DOM에서 읽기
-        if (!capturedData) {
-            console.warn(`${LOG} React fiber 실패, DOM에서 읽기 시도`);
-            capturedData = readFormFromDOM();
-        }
-
-        // 3차: fetch 가로채기 (임시저장 버튼 클릭)
-        if (!capturedData) {
-            console.warn(`${LOG} DOM 읽기도 실패, fetch 가로채기 시도`);
-            const saveBtn = findSaveButton();
-            if (saveBtn) {
-                capturedData = await new Promise((resolve) => {
-                    interceptResolve = resolve;
-                    interceptMode = true;
-                    setTimeout(() => { if (interceptMode) { interceptMode = false; resolve(null); } }, 5000);
-                    saveBtn.click();
-                });
-            }
-        }
-
-        if (!capturedData) {
-            toast('데이터를 못 읽었어요 ㅠ\n폼에 내용을 채운 후 다시 시도해주세요.', 4000);
-            return;
-        }
-
-        // 깊은 복사 (React 프록시 객체 대응)
-        let cleanData;
-        try {
-            cleanData = JSON.parse(JSON.stringify(capturedData));
-        } catch (_) {
-            cleanData = { ...capturedData };
-        }
-
-        const entry = {
-            id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            name: cleanData.name || '이름 없는 스토리',
-            date: new Date().toISOString(),
-            data: cleanData
-        };
-
-        addDraft(entry);
-        console.log(`${LOG} 임시등록 완료`, { id: entry.id, name: entry.name, keys: Object.keys(cleanData) });
-        const keyCount = Object.keys(cleanData).length;
-        toast(`✓ 임시등록 완료!\n"${entry.name}" 저장됨 (필드 ${keyCount}개 캡처)`, 3500);
     }
 
     // ─────── 불러오기 (복원) ───────
@@ -333,49 +196,12 @@
         } catch (_) { return iso; }
     }
 
-    function fillFormField(el, value) {
-        if (!el || value === undefined || value === null) return;
-        const val = String(value);
-        const setter = el.tagName === 'TEXTAREA'
-            ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-            : Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-        if (setter) {
-            setter.call(el, val);
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
+    function updateFabCount() {
+        const fab = document.getElementById('dbm-fab');
+        if (fab) {
+            const count = loadDrafts().length;
+            fab.textContent = `📂 임시등록 목록${count ? ` (${count})` : ''}`;
         }
-    }
-
-    function tryFillForm(data) {
-        let filled = 0;
-
-        // 이름 필드 (보통 첫 번째 input)
-        const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-        const textareas = document.querySelectorAll('textarea');
-
-        // 이름
-        if (data.name && inputs.length > 0) {
-            fillFormField(inputs[0], data.name);
-            filled++;
-        }
-
-        // 간단한 설명
-        if (data.simpleDescription && inputs.length > 1) {
-            fillFormField(inputs[1], data.simpleDescription);
-            filled++;
-        }
-
-        // 스토리 설정 및 정보 / 상세 설명 (textarea)
-        if (textareas.length > 0) {
-            const storyDetail = data.storyDetails || data.description || '';
-            if (storyDetail) {
-                fillFormField(textareas[0], storyDetail);
-                filled++;
-            }
-        }
-
-        console.log(`${LOG} 폼 채우기: ${filled}개 필드`);
-        return filled;
     }
 
     function sanitizeForPatch(raw) {
@@ -428,6 +254,18 @@
                 ...(set?.baseSetId ? { baseSetId: set.baseSetId } : {}),
                 ...(set?.playGuide ? { playGuide: str(set.playGuide) } : {})
             }));
+        } else if (raw?.initialMessage) {
+            // 팝업에서 입력한 첫 메시지 → startingSets로 변환
+            payload.startingSets = [{
+                name: '기본 설정',
+                initialMessages: [{ role: 'assistant', content: str(raw.initialMessage) }],
+                situationPrompt: '',
+                replySuggestions: [],
+                situationImages: [],
+                keywordBook: [],
+                parameters: [],
+                imageMatrix: {}
+            }];
         }
 
         // 선택 필드들 (있으면 넣고, 없으면 안 넣음)
@@ -659,7 +497,7 @@
         localSaveBtn.className = 'ld-ebtn save';
         localSaveBtn.textContent = '💾 임시등록';
         localSaveBtn.title = '미등록 슬롯 안 씀! 확장프로그램 내부에 저장';
-        localSaveBtn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); doLocalSave(); });
+        localSaveBtn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openSavePopup(); });
 
         const loadBtn = document.createElement('button');
         loadBtn.className = 'ld-ebtn load';
@@ -679,7 +517,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v2.5.0`);
+        console.log(`${LOG} 로드 완료 v3.0.0`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
