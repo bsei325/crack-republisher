@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      2.2.0
+// @version      2.3.0
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -432,20 +432,10 @@
     }
 
     async function loadFromDraft(draft) {
-        toast(`"${draft.name}" 불러오는 중...`, 3000);
-
         const data = draft.data;
+        const name = draft.name;
 
-        // 1차: 현재 폼에 직접 채우기 시도
-        const filled = tryFillForm(data);
-
-        if (filled > 0) {
-            toast(`✓ "${draft.name}" 불러옴!\n기본 필드 ${filled}개 채움\n\n💡 나머지는 탭별로 확인해주세요.`, 5000);
-            return;
-        }
-
-        // 2차: API로 스토리 생성 + PATCH (미등록 슬롯 1개 사용)
-        if (!confirm(`폼 직접 채우기가 안 돼서\n서버에 새 스토리로 만들어야 해요.\n(미등록 슬롯 1개 사용)\n\n계속할까요?`)) {
+        if (!confirm(`"${name}" 복원하면\n미등록 슬롯 1개를 사용해요.\n\n계속할까요?`)) {
             toast('취소됨', 2000);
             return;
         }
@@ -493,7 +483,7 @@
             for (const url of [`${API_BASE}/stories/${newId}/v2`, `${API_BASE}/stories/${newId}`]) {
                 try {
                     await apiFetch('PATCH', url, patchPayload, 'PATCH');
-                    toast(`✓ "${draft.name}" 복원 완료!\n/my에서 확인해주세요.`, 3000);
+                    toast(`✓ "${name}" 복원 완료!\n/my에서 확인해주세요.`, 3000);
                     setTimeout(() => { location.href = `/my`; }, 1500);
                     return;
                 } catch (err) {
@@ -643,7 +633,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v2.2.0`);
+        console.log(`${LOG} 로드 완료 v2.3.0`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
