@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      3.0.1
+// @version      3.0.2
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -477,11 +477,29 @@
     // ─────── 에디터 감지 ───────
 
     function findSaveButton() {
-        const buttons = document.querySelectorAll('button, [role="button"]');
-        for (const btn of buttons) {
-            const text = btn.textContent?.trim();
-            if (text === '임시저장' || text === '임시 저장') return btn;
+        // 모든 버튼/클릭 요소에서 "임시" 포함된 것 찾기
+        const allBtns = document.querySelectorAll('button, [role="button"], a');
+        for (const btn of allBtns) {
+            const text = (btn.textContent || '').trim();
+            if (text.includes('임시저장') || text.includes('임시 저장')) return btn;
         }
+        // aria-label로도 찾기
+        const ariaBtn = document.querySelector('[aria-label*="임시"]');
+        if (ariaBtn) return ariaBtn;
+        return null;
+    }
+
+    function findEditorHeader() {
+        // 임시저장 버튼이 없어도 에디터 헤더 영역 찾기
+        // "스토리 만들기" 또는 "등록하기" 텍스트가 있는 영역
+        const allBtns = document.querySelectorAll('button, [role="button"]');
+        for (const btn of allBtns) {
+            const text = (btn.textContent || '').trim();
+            if (text === '등록하기' || text === '등록') return btn.parentElement;
+        }
+        // 시계 아이콘 (임시저장 옆에 있는)
+        const clockBtn = document.querySelector('button svg[class*="clock"], button [class*="clock"]');
+        if (clockBtn) return clockBtn.closest('button')?.parentElement;
         return null;
     }
 
@@ -490,16 +508,14 @@
     const EDITOR_MARKER = 'ld-editor-injected';
 
     function injectEditorButtons() {
-        // 임시저장 버튼이 있는 페이지 = 에디터
-        const saveBtn = findSaveButton();
-        if (!saveBtn) return;
-
         // 이미 삽입됐으면 스킵
         if (document.querySelector(`.${EDITOR_MARKER}`)) return;
 
-        // 임시저장 버튼 옆에 우리 버튼 추가
-        const parent = saveBtn.parentElement;
-        if (!parent) return;
+        // 임시저장 버튼 또는 에디터 헤더 찾기
+        const saveBtn = findSaveButton();
+        const headerArea = saveBtn?.parentElement || findEditorHeader();
+
+        if (!headerArea) return;
 
         const container = document.createElement('div');
         container.className = `ld-editor-btns ${EDITOR_MARKER}`;
@@ -519,8 +535,14 @@
         container.appendChild(localSaveBtn);
         container.appendChild(loadBtn);
 
-        // 임시저장 버튼 앞에 삽입
-        parent.insertBefore(container, saveBtn);
+        // 삽입 위치: 임시저장 앞 또는 헤더 끝
+        if (saveBtn) {
+            headerArea.insertBefore(container, saveBtn);
+        } else {
+            headerArea.appendChild(container);
+        }
+
+        console.log(`${LOG} 에디터 버튼 삽입 완료`);
     }
 
     // ─────── 초기화 ───────
@@ -528,7 +550,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v3.0.1`);
+        console.log(`${LOG} 로드 완료 v3.0.2`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
