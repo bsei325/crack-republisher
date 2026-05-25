@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.4.0
+// @version      1.6.0
 // @author       me
-// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 스토리 안의 투명 이미지를 자동 감지해 즉시 채움
+// @description  GitHub 투명 이미지를 크랙에 자동 업로드한 뒤 v2 이미지 배치표 빈칸을 자동 채움
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @updateURL    https://raw.githubusercontent.com/bsei325/crack-republisher/main/crack-v2-gap-filler.user.js
@@ -15,6 +15,12 @@
 
     const API_BASE = 'https://crack-api.wrtn.ai/crack-api';
     const LOG = '[v2 빈칸 채우기]';
+
+    // GitHub에 올려둔 투명 strip 이미지. 실패하면 내장된 투명 strip PNG로 대체한다.
+    const GITHUB_TRANSPARENT_STRIP_URL = 'https://raw.githubusercontent.com/bsei325/crack-republisher/main/transparent-strip-2000x4.png';
+    const TRANSPARENT_UPLOAD_CATEGORY = '투명';
+    const TRANSPARENT_UPLOAD_SITUATION = '빈칸';
+    const BUILTIN_TRANSPARENT_STRIP_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAB9AAAAAECAYAAADWMKTOAAAAQUlEQVR42u3ZQQEAIACEMLR/5zOIWwS+nG0BAAAAAAAAwO+uBAAAAAAAAABgoAMAAAAAAABAZaADAAAAAAAAQFUPFhYDBYINOjAAAAAASUVORK5CYII=';
 
     // 외부 이미지 URL은 크랙 서버가 막을 수 있어서 사용하지 않는다.
     // 스토리 안에 이미 업로드되어 있는 투명/공백/strip 이미지를 자동 감지해서 그 URL을 재사용한다.
@@ -236,6 +242,58 @@
         return s.slice(0, 10);
     }
 
+    function extractImageUrlFromValue(value) {
+        if (!value) return '';
+
+        if (typeof value === 'string') {
+            const s = value.trim();
+            // 크랙 PATCH는 blob/data/raw가 아니라 업로드 완료된 http(s) URL만 안정적으로 받는다.
+            return /^https?:\/\//i.test(s) ? s : '';
+        }
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                const got = extractImageUrlFromValue(item);
+                if (got) return got;
+            }
+            return '';
+        }
+
+        if (typeof value === 'object') {
+            const keys = [
+                'imageUrl',
+                'url',
+                'origin',
+                'original',
+                'src',
+                'path',
+                'fileUrl',
+                'downloadUrl',
+                'thumbnailUrl'
+            ];
+
+            for (const key of keys) {
+                if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+                const got = extractImageUrlFromValue(value[key]);
+                if (got) return got;
+            }
+        }
+
+        return '';
+    }
+
+    function extractSituationImageUrl(img) {
+        return extractImageUrlFromValue(
+            img?.imageUrl ||
+            img?.image ||
+            img?.imageFile ||
+            img?.file ||
+            img?.uploadedImage ||
+            img?.resource ||
+            img?.url
+        );
+    }
+
     function normalizeV2SetLabels(set) {
         const imgs = Array.isArray(set?.situationImages) ? set.situationImages : [];
         const matrix = set?.imageMatrix || {};
@@ -275,18 +333,21 @@
         const defaultSituation = Array.from(sitMap.values())[0] || '기본';
 
         const situationImages = imgs
-            .filter(img => img?.imageUrl)
             .map((img, idx) => {
+                const imageUrl = extractSituationImageUrl(img);
+                if (!imageUrl) return null;
+
                 const rawCat = extractV2Label(img?.category, '', ['name', 'category', 'label', 'keyword']);
                 const rawSit = extractV2Label(img?.situation, '', ['keyword', 'name', 'situation', 'label']);
 
                 return compactObject({
                     situation: rawSit ? getSit(rawSit, idx) : defaultSituation,
                     keyword: trimKeyword(img?.keyword, ''),
-                    imageUrl: img.imageUrl,
+                    imageUrl,
                     category: rawCat ? getCat(rawCat, idx) : defaultCategory
                 });
-            });
+            })
+            .filter(Boolean);
 
         const categories = Array.from(catMap.values()).filter(Boolean).map(v => String(v).slice(0, 10));
         const situations = Array.from(sitMap.values()).filter(Boolean).map(v => String(v).slice(0, 10));
@@ -423,9 +484,19 @@
         return { set: out, added: filled.added };
     }
 
-    function buildPatchPayload(raw, placeholderUrl) {
+    function buildPatchPayload(raw, placeholderUrlByBaseSetId) {
+        const fallbackUrl = placeholderUrlByBaseSetId instanceof Map
+            ? (placeholderUrlByBaseSetId.get('__default') || Array.from(placeholderUrlByBaseSetId.values())[0])
+            : placeholderUrlByBaseSetId;
+
         const setResults = (Array.isArray(raw?.startingSets) ? raw.startingSets : [])
-            .map(set => buildPatchStartingSet(set, placeholderUrl));
+            .map(set => {
+                const baseSetId = getBaseSetId(set);
+                const url = placeholderUrlByBaseSetId instanceof Map
+                    ? (placeholderUrlByBaseSetId.get(baseSetId) || fallbackUrl)
+                    : fallbackUrl;
+                return buildPatchStartingSet(set, url);
+            });
         const startingSets = setResults.map(r => r.set);
         const added = setResults.reduce((sum, r) => sum + r.added, 0);
 
@@ -474,13 +545,14 @@
         sets.forEach((set, setIndex) => {
             const normalized = normalizeV2SetLabels(set);
             (normalized.situationImages || []).forEach((img, imageIndex) => {
-                if (!img?.imageUrl) return;
+                const imageUrl = extractSituationImageUrl(img);
+                if (!imageUrl) return;
 
                 const category = img.category ? String(img.category).slice(0, 10) : '';
                 const situation = img.situation ? String(img.situation).slice(0, 10) : '';
                 const keyword = img.keyword ? String(img.keyword).slice(0, 10) : '';
                 const combo = `${category}_${situation}`;
-                const dedupe = `${combo}|||${img.imageUrl}`;
+                const dedupe = `${combo}|||${imageUrl}`;
 
                 if (seen.has(dedupe)) return;
                 seen.add(dedupe);
@@ -491,7 +563,7 @@
                     situation,
                     keyword,
                     combo,
-                    imageUrl: img.imageUrl,
+                    imageUrl,
                     setIndex,
                     imageIndex
                 });
@@ -573,6 +645,190 @@
         return null;
     }
 
+
+    function base64ToBlob(base64, mimeType = 'image/png') {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mimeType });
+    }
+
+    async function getTransparentStripBlob() {
+        try {
+            const res = await fetch(`${GITHUB_TRANSPARENT_STRIP_URL}?t=${Date.now()}`, {
+                method: 'GET',
+                cache: 'no-store',
+                mode: 'cors'
+            });
+            if (res.ok) {
+                const blob = await res.blob();
+                if (blob && blob.size > 0) {
+                    console.log(`${LOG} GitHub 투명 이미지 사용`, { size: blob.size, type: blob.type });
+                    return blob.type ? blob : new Blob([blob], { type: 'image/png' });
+                }
+            }
+            console.warn(`${LOG} GitHub 투명 이미지 fetch 실패`, res.status);
+        } catch (e) {
+            console.warn(`${LOG} GitHub 투명 이미지 fetch 에러, 내장 이미지 사용`, e);
+        }
+
+        const fallback = base64ToBlob(BUILTIN_TRANSPARENT_STRIP_PNG_BASE64, 'image/png');
+        console.log(`${LOG} 내장 투명 이미지 사용`, { size: fallback.size, type: fallback.type });
+        return fallback;
+    }
+
+    function getStorySourceId(raw, storyId) {
+        return raw?._id || raw?.id || raw?.sourceId || storyId;
+    }
+
+    function getPatchableStartingSetIds(raw) {
+        const ids = [];
+        const seen = new Set();
+        for (const set of (Array.isArray(raw?.startingSets) ? raw.startingSets : [])) {
+            const baseSetId = getBaseSetId(set);
+            if (!baseSetId || seen.has(baseSetId)) continue;
+            seen.add(baseSetId);
+            ids.push(baseSetId);
+        }
+        return ids;
+    }
+
+    function parsePresignedUploads(bulkResponse) {
+        const map = new Map();
+        const startingSets = Array.isArray(bulkResponse?.data?.startingSets)
+            ? bulkResponse.data.startingSets
+            : [];
+
+        for (const setResult of startingSets) {
+            const baseSetId = setResult?.baseSetId;
+            const upload = Array.isArray(setResult?.uploads) ? setResult.uploads[0] : null;
+            const presignedUrl = upload?.url;
+
+            if (!baseSetId || !presignedUrl) continue;
+
+            map.set(baseSetId, {
+                baseSetId,
+                uploadId: upload?._id,
+                presignedUrl,
+                finalUrl: String(presignedUrl).split('?')[0],
+                category: upload?.category || TRANSPARENT_UPLOAD_CATEGORY,
+                situation: upload?.situation || TRANSPARENT_UPLOAD_SITUATION
+            });
+        }
+
+        return map;
+    }
+
+    async function putToS3PresignedUrl(presignedUrl, blob) {
+        async function attempt(withContentType) {
+            const opts = {
+                method: 'PUT',
+                mode: 'cors',
+                body: blob
+            };
+            if (withContentType) {
+                opts.headers = { 'Content-Type': 'image/png' };
+            }
+
+            const res = await fetch(presignedUrl, opts);
+            if (!res.ok) {
+                let body = '';
+                try { body = await res.text(); } catch (_) {}
+                throw new Error(`S3 PUT 실패 ${res.status} ${body.slice(0, 180)}`);
+            }
+            return res;
+        }
+
+        try {
+            return await attempt(true);
+        } catch (firstErr) {
+            console.warn(`${LOG} Content-Type 포함 PUT 실패, 무헤더로 재시도`, firstErr);
+            return await attempt(false);
+        }
+    }
+
+    async function uploadTransparentToCrack(raw, storyId) {
+        const sourceId = getStorySourceId(raw, storyId);
+        const baseSetIds = getPatchableStartingSetIds(raw);
+
+        if (!sourceId) throw new Error('sourceId를 못 찾았어요.');
+        if (!baseSetIds.length) throw new Error('startingSet baseSetId를 못 찾았어요.');
+
+        const bulkPayload = {
+            sourceId,
+            uploads: [{
+                fileType: 'png',
+                category: TRANSPARENT_UPLOAD_CATEGORY,
+                situation: TRANSPARENT_UPLOAD_SITUATION
+            }],
+            startingSets: baseSetIds.map(baseSetId => ({ baseSetId }))
+        };
+
+        console.log(`${LOG} presigned bulk 요청`, bulkPayload);
+
+        const bulkResponse = await apiFetch(
+            'POST',
+            `${API_BASE}/situation-images/presigned-urls/bulk`,
+            bulkPayload,
+            '투명 이미지 presigned bulk'
+        );
+
+        const uploadMap = parsePresignedUploads(bulkResponse);
+        if (!uploadMap.size) {
+            console.error(`${LOG} presigned bulk 응답 파싱 실패`, bulkResponse);
+            throw new Error('투명 이미지 업로드 URL을 못 받았어요.');
+        }
+
+        const blob = await getTransparentStripBlob();
+        const finalUrlByBaseSetId = new Map();
+
+        for (const [baseSetId, info] of uploadMap.entries()) {
+            console.log(`${LOG} S3 PUT 시작`, {
+                baseSetId,
+                uploadId: info.uploadId,
+                finalUrl: info.finalUrl
+            });
+
+            await putToS3PresignedUrl(info.presignedUrl, blob);
+            finalUrlByBaseSetId.set(baseSetId, info.finalUrl);
+        }
+
+        if (!finalUrlByBaseSetId.size) {
+            throw new Error('투명 이미지 업로드에 실패했어요.');
+        }
+
+        finalUrlByBaseSetId.set('__default', Array.from(finalUrlByBaseSetId.values())[0]);
+        return finalUrlByBaseSetId;
+    }
+
+    async function patchWithRetry(storyId, payload, maxTries = 5) {
+        let lastErr = null;
+
+        for (let attempt = 1; attempt <= maxTries; attempt++) {
+            try {
+                return await apiFetch('PATCH', `${API_BASE}/stories/${storyId}/v2`, payload, `투명 빈칸 PATCH ${attempt}`);
+            } catch (err) {
+                lastErr = err;
+                const msg = String(err?.message || '');
+                const retryable =
+                    msg.includes('업로드') ||
+                    msg.includes('완료') ||
+                    msg.includes('상황 이미지') ||
+                    err?.status === 400;
+
+                if (!retryable || attempt === maxTries) throw err;
+
+                console.warn(`${LOG} PATCH 재시도 대기`, { attempt, message: msg });
+                toast(`업로드 반영 대기 중... (${attempt}/${maxTries})`, 2600);
+                await new Promise(resolve => setTimeout(resolve, 1200 * attempt));
+            }
+        }
+
+        throw lastErr || new Error('PATCH 실패');
+    }
+
 async function fillStoryGaps(storyId) {
         toast('v2 이미지 배치표 확인 중...');
         try {
@@ -585,24 +841,15 @@ async function fillStoryGaps(storyId) {
                 return;
             }
 
-            toast('투명 이미지를 자동으로 찾는 중...');
-            const picked = await pickPlaceholderChoiceAuto(raw);
-            if (!picked) {
-                toast(
-                    '투명 strip 이미지를 자동으로 못 찾았어요.\n' +
-                    '투명 이미지가 들어간 칸 이름/키워드에 투명, 공백, blank 중 하나를 넣고 저장한 뒤 다시 눌러줘.',
-                    7500
-                );
-                return;
-            }
+            toast('투명 이미지를 크랙에 자동 업로드 중...', 5000);
+            const placeholderUrlByBaseSetId = await uploadTransparentToCrack(raw, storyId);
 
-            const { payload, added } = buildPatchPayload(raw, picked.imageUrl);
+            const { payload, added } = buildPatchPayload(raw, placeholderUrlByBaseSetId);
 
             console.log(`${LOG} PATCH payload`, {
                 storyId,
                 added,
-                placeholderChoice: picked,
-                detectReason: picked.detectReason,
+                placeholderUrlByBaseSetId: Object.fromEntries(placeholderUrlByBaseSetId),
                 payload
             });
 
@@ -611,17 +858,13 @@ async function fillStoryGaps(storyId) {
                 return;
             }
 
-            const detected = picked.detectReason === 'size' && picked.width && picked.height
-                ? `${picked.combo} (${picked.width}×${picked.height})`
-                : picked.combo;
+            toast(`빈칸 ${added}개를 투명 이미지로 채우는 중...`, 5000);
+            await patchWithRetry(storyId, payload, 5);
 
-            toast(`자동 감지: ${detected}\n빈칸 ${added}개를 채우는 중...`, 5000);
-            await apiFetch('PATCH', `${API_BASE}/stories/${storyId}/v2`, payload, '투명 빈칸 PATCH');
-
-            toast(`✓ 완료!\n빈 조합 ${added}개를 자동으로 채웠어요.`, 5200);
+            toast(`✓ 완료!\nGitHub 투명 이미지 업로드 후 빈 조합 ${added}개를 자동으로 채웠어요.`, 5600);
         } catch (err) {
             console.error(`${LOG} 실패`, err);
-            toast('실패 ㅠㅠ\n' + String(err?.message || err).slice(0, 220), 7000);
+            toast('실패 ㅠㅠ\n' + String(err?.message || err).slice(0, 240), 8000);
         }
     }
 
@@ -693,7 +936,7 @@ async function fillStoryGaps(storyId) {
             return;
         }
 
-        container.appendChild(createButton('🧩 자동으로 빈칸 채우기', () => fillStoryGaps(info.id)));
+        container.appendChild(createButton('🧩 GitHub 투명 이미지로 자동 채우기', () => fillStoryGaps(info.id)));
     }
 
     function init() {
@@ -701,7 +944,7 @@ async function fillStoryGaps(storyId) {
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.4.0`);
+        console.log(`${LOG} 로드 완료 v1.6.0`);
     }
 
     if (document.readyState === 'loading') {
