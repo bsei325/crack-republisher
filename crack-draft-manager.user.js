@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      2.3.0
+// @version      2.4.0
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -141,16 +141,17 @@
     };
 
     function hasStoryKeys(obj) {
-        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return 0;
         const keys = Object.keys(obj);
         const storyKeys = ['name', 'customPrompt', 'storyDetails', 'startingSets',
             'situationImageVersion', 'chatType', 'description', 'promptTemplate',
-            'chatExamples', 'tags', 'simpleDescription', 'detailDescription'];
-        return storyKeys.filter(k => keys.includes(k)).length >= 3;
+            'chatExamples', 'tags', 'simpleDescription', 'detailDescription',
+            'model', 'visibility', 'shortcutCommands', 'defaultCrackerModel',
+            'chatModelId', 'genreId', 'portraitImageUrl', 'isCommentBlocked'];
+        return storyKeys.filter(k => keys.includes(k)).length;
     }
 
     function extractFromReactFiber() {
-        // React 루트 찾기
         const roots = [
             document.getElementById('__next'),
             document.getElementById('root'),
@@ -158,61 +159,74 @@
             document.body
         ].filter(Boolean);
 
+        let bestMatch = null;
+        let bestScore = 0;
+
         for (const root of roots) {
             const fiberKey = Object.keys(root).find(k =>
                 k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance'));
             if (!fiberKey) continue;
 
-            let found = null;
+            function checkCandidate(obj) {
+                if (!obj || typeof obj !== 'object') return;
+                const score = hasStoryKeys(obj);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = obj;
+                }
+            }
 
             function walk(fiber, depth) {
-                if (!fiber || found || depth > 80) return;
+                if (!fiber || depth > 100) return;
 
-                // hooks 체인 탐색 (함수 컴포넌트)
+                // hooks 체인
                 let hook = fiber.memoizedState;
-                let hookIdx = 0;
-                while (hook && hookIdx < 50) {
+                let hi = 0;
+                while (hook && hi < 60) {
                     const val = hook.memoizedState;
                     if (val && typeof val === 'object') {
-                        if (hasStoryKeys(val)) { found = val; return; }
-                        if (Array.isArray(val) && val[0] && hasStoryKeys(val[0])) { found = val[0]; return; }
-                    }
-                    if (hook.queue?.lastRenderedState && hasStoryKeys(hook.queue.lastRenderedState)) {
-                        found = hook.queue.lastRenderedState; return;
-                    }
-                    hook = hook.next;
-                    hookIdx++;
-                }
-
-                // 클래스 컴포넌트 state
-                if (fiber.stateNode?.state && hasStoryKeys(fiber.stateNode.state)) {
-                    found = fiber.stateNode.state; return;
-                }
-
-                // props 확인
-                if (fiber.memoizedProps && hasStoryKeys(fiber.memoizedProps)) {
-                    found = fiber.memoizedProps; return;
-                }
-                // props 안의 중첩 객체
-                if (fiber.memoizedProps) {
-                    for (const v of Object.values(fiber.memoizedProps)) {
-                        if (v && typeof v === 'object' && hasStoryKeys(v)) {
-                            found = v; return;
+                        checkCandidate(val);
+                        if (Array.isArray(val) && val[0]) checkCandidate(val[0]);
+                        // 중첩 객체도 체크
+                        if (!Array.isArray(val)) {
+                            for (const v of Object.values(val)) {
+                                if (v && typeof v === 'object' && !Array.isArray(v)) checkCandidate(v);
+                            }
                         }
                     }
+                    if (hook.queue?.lastRenderedState) checkCandidate(hook.queue.lastRenderedState);
+                    hook = hook.next;
+                    hi++;
                 }
 
+                // 클래스 컴포넌트
+                if (fiber.stateNode?.state) checkCandidate(fiber.stateNode.state);
+
+                // props
+                if (fiber.memoizedProps) {
+                    checkCandidate(fiber.memoizedProps);
+                    for (const v of Object.values(fiber.memoizedProps)) {
+                        if (v && typeof v === 'object' && !Array.isArray(v)) checkCandidate(v);
+                    }
+                }
+
+                // Context
+                if (fiber.memoizedProps?.value) checkCandidate(fiber.memoizedProps.value);
+                if (fiber.pendingProps?.value) checkCandidate(fiber.pendingProps.value);
+
                 walk(fiber.child, depth + 1);
-                if (!found) walk(fiber.sibling, depth + 1);
+                walk(fiber.sibling, depth + 1);
             }
 
             walk(root[fiberKey], 0);
-            if (found) {
-                console.log(`${LOG} React fiber에서 데이터 발견!`, Object.keys(found));
-                return found;
-            }
         }
 
+        if (bestMatch && bestScore >= 5) {
+            console.log(`${LOG} React fiber 최적 매칭 (${bestScore}개 키)`, Object.keys(bestMatch));
+            return bestMatch;
+        }
+
+        console.warn(`${LOG} React fiber 매칭 실패 (최고 ${bestScore}개 키)`);
         return null;
     }
 
@@ -305,7 +319,8 @@
 
         addDraft(entry);
         console.log(`${LOG} 임시등록 완료`, { id: entry.id, name: entry.name, keys: Object.keys(cleanData) });
-        toast(`✓ 임시등록 완료!\n"${entry.name}" 저장됨 (${loadDrafts().length}개)`, 3500);
+        const keyCount = Object.keys(cleanData).length;
+        toast(`✓ 임시등록 완료!\n"${entry.name}" 저장됨 (필드 ${keyCount}개 캡처)`, 3500);
     }
 
     // ─────── 불러오기 (복원) ───────
@@ -633,7 +648,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v2.3.0`);
+        console.log(`${LOG} 로드 완료 v2.4.0`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
