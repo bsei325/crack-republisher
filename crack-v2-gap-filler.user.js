@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.6.0
+// @version      1.7.0
 // @author       me
-// @description  GitHub 투명 이미지를 크랙에 자동 업로드한 뒤 v2 이미지 배치표 빈칸을 자동 채움
+// @description  GitHub 투명 이미지를 크랙에 자동 업로드한 뒤 v2 이미지 배치표 빈칸을 자동 채움 (완료 확인 포함)
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @updateURL    https://raw.githubusercontent.com/bsei325/crack-republisher/main/crack-v2-gap-filler.user.js
@@ -697,6 +697,7 @@
 
     function parsePresignedUploads(bulkResponse) {
         const map = new Map();
+        const bulkId = bulkResponse?.data?.bulkId || '';
         const startingSets = Array.isArray(bulkResponse?.data?.startingSets)
             ? bulkResponse.data.startingSets
             : [];
@@ -718,7 +719,7 @@
             });
         }
 
-        return map;
+        return { map, bulkId };
     }
 
     async function putToS3PresignedUrl(presignedUrl, blob) {
@@ -749,6 +750,51 @@
         }
     }
 
+    async function tryCompleteUpload(bulkId, sourceId, uploadMap) {
+        // 완료 확인 API 후보들을 순서대로 시도
+        const uploadIds = Array.from(uploadMap.values()).map(v => v.uploadId).filter(Boolean);
+        const endpoints = [
+            {
+                url: `${API_BASE}/situation-images/presigned-urls/bulk/${bulkId}/complete`,
+                method: 'POST',
+                body: { sourceId }
+            },
+            {
+                url: `${API_BASE}/situation-images/bulk/${bulkId}/complete`,
+                method: 'POST',
+                body: { sourceId }
+            },
+            {
+                url: `${API_BASE}/situation-images/presigned-urls/bulk/complete`,
+                method: 'POST',
+                body: { bulkId, sourceId }
+            },
+            {
+                url: `${API_BASE}/situation-images/upload-complete`,
+                method: 'POST',
+                body: { bulkId, sourceId, uploadIds }
+            }
+        ];
+
+        for (const ep of endpoints) {
+            try {
+                const result = await apiFetch(ep.method, ep.url, ep.body, `완료 확인 ${ep.url}`);
+                console.log(`${LOG} ✓ 완료 확인 성공`, { url: ep.url, result });
+                return result;
+            } catch (err) {
+                const status = err?.status || 0;
+                console.log(`${LOG} 완료 확인 시도`, { url: ep.url, status, msg: err?.message });
+                // 404/405 = 이 엔드포인트가 아님, 다음 시도
+                if (status === 404 || status === 405) continue;
+                // 다른 에러면 기록하고 다음
+                continue;
+            }
+        }
+
+        console.warn(`${LOG} 완료 확인 엔드포인트를 못 찾았어요. 지연 후 PATCH 시도합니다.`);
+        return null;
+    }
+
     async function uploadTransparentToCrack(raw, storyId) {
         const sourceId = getStorySourceId(raw, storyId);
         const baseSetIds = getPatchableStartingSetIds(raw);
@@ -775,11 +821,15 @@
             '투명 이미지 presigned bulk'
         );
 
-        const uploadMap = parsePresignedUploads(bulkResponse);
+        console.log(`${LOG} presigned bulk 응답`, bulkResponse);
+
+        const { map: uploadMap, bulkId } = parsePresignedUploads(bulkResponse);
         if (!uploadMap.size) {
             console.error(`${LOG} presigned bulk 응답 파싱 실패`, bulkResponse);
             throw new Error('투명 이미지 업로드 URL을 못 받았어요.');
         }
+
+        console.log(`${LOG} bulkId = ${bulkId}, uploadMap 크기 = ${uploadMap.size}`);
 
         const blob = await getTransparentStripBlob();
         const finalUrlByBaseSetId = new Map();
@@ -792,12 +842,23 @@
             });
 
             await putToS3PresignedUrl(info.presignedUrl, blob);
+            console.log(`${LOG} S3 PUT 성공`, { baseSetId });
             finalUrlByBaseSetId.set(baseSetId, info.finalUrl);
         }
 
         if (!finalUrlByBaseSetId.size) {
             throw new Error('투명 이미지 업로드에 실패했어요.');
         }
+
+        // ★ 핵심: S3 업로드 후 크랙 서버에 완료 확인 요청
+        if (bulkId) {
+            toast('업로드 완료 확인 중...', 3000);
+            await tryCompleteUpload(bulkId, sourceId, uploadMap);
+        }
+
+        // 서버 처리 시간 대기
+        console.log(`${LOG} 서버 처리 대기 3초...`);
+        await new Promise(r => setTimeout(r, 3000));
 
         finalUrlByBaseSetId.set('__default', Array.from(finalUrlByBaseSetId.values())[0]);
         return finalUrlByBaseSetId;
@@ -822,7 +883,7 @@
 
                 console.warn(`${LOG} PATCH 재시도 대기`, { attempt, message: msg });
                 toast(`업로드 반영 대기 중... (${attempt}/${maxTries})`, 2600);
-                await new Promise(resolve => setTimeout(resolve, 1200 * attempt));
+                await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
             }
         }
 
@@ -844,13 +905,19 @@ async function fillStoryGaps(storyId) {
             toast('투명 이미지를 크랙에 자동 업로드 중...', 5000);
             const placeholderUrlByBaseSetId = await uploadTransparentToCrack(raw, storyId);
 
-            const { payload, added } = buildPatchPayload(raw, placeholderUrlByBaseSetId);
+            // ★ 업로드 후 스토리를 다시 조회 (서버 상태 반영)
+            toast('업로드 반영 확인 중...', 3000);
+            const freshDetail = await apiFetch('GET', `${API_BASE}/stories/me/${storyId}`, undefined, '스토리 재조회');
+            const freshRaw = freshDetail?.data || raw;
+
+            const { payload, added } = buildPatchPayload(freshRaw, placeholderUrlByBaseSetId);
 
             console.log(`${LOG} PATCH payload`, {
                 storyId,
                 added,
                 placeholderUrlByBaseSetId: Object.fromEntries(placeholderUrlByBaseSetId),
-                payload
+                startingSetsCount: payload?.startingSets?.length,
+                situationImagesCount: payload?.startingSets?.map(s => s?.situationImages?.length)
             });
 
             if (added <= 0) {
@@ -864,7 +931,10 @@ async function fillStoryGaps(storyId) {
             toast(`✓ 완료!\nGitHub 투명 이미지 업로드 후 빈 조합 ${added}개를 자동으로 채웠어요.`, 5600);
         } catch (err) {
             console.error(`${LOG} 실패`, err);
-            toast('실패 ㅠㅠ\n' + String(err?.message || err).slice(0, 240), 8000);
+            const errMsg = String(err?.message || err).slice(0, 240);
+            const hint = errMsg.includes('업로드') ?
+                '\n\n💡 Console에서 "[v2 빈칸 채우기] 완료 확인 시도" 로그를 확인해주세요.' : '';
+            toast('실패 ㅠㅠ\n' + errMsg + hint, 8000);
         }
     }
 
@@ -944,7 +1014,7 @@ async function fillStoryGaps(storyId) {
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.6.0`);
+        console.log(`${LOG} 로드 완료 v1.7.0`);
     }
 
     if (document.readyState === 'loading') {
