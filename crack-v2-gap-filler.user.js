@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.2.0
+// @version      1.3.0
 // @author       me
-// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 스토리 안의 기존 투명 이미지로 채움
+// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 스토리 안의 투명 이미지를 자동 감지해 채움
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @updateURL    https://raw.githubusercontent.com/bsei325/crack-republisher/main/crack-v2-gap-filler.user.js
@@ -490,33 +490,85 @@
         return choices;
     }
 
-    function pickPlaceholderChoice(choices) {
+    function labelLooksTransparent(choice) {
+        return /투명|빈칸|공백|blank|transparent|strip|spacer|empty|틈/i.test(
+            `${choice.combo} ${choice.keyword} ${choice.setName}`
+        );
+    }
+
+    function getImageSize(url, timeoutMs = 4500) {
+        return new Promise(resolve => {
+            const img = new Image();
+            let done = false;
+
+            const finish = result => {
+                if (done) return;
+                done = true;
+                resolve(result);
+            };
+
+            const timer = setTimeout(() => finish(null), timeoutMs);
+
+            img.onload = () => {
+                clearTimeout(timer);
+                finish({
+                    width: img.naturalWidth || img.width || 0,
+                    height: img.naturalHeight || img.height || 0
+                });
+            };
+            img.onerror = () => {
+                clearTimeout(timer);
+                finish(null);
+            };
+            img.src = url;
+        });
+    }
+
+    async function pickPlaceholderChoiceAuto(choices) {
         if (!choices.length) return null;
 
-        const suggested = choices.find(c => /투명|빈칸|공백|blank|transparent/i.test(`${c.combo} ${c.keyword} ${c.setName}`)) || choices[0];
-        const lines = choices.slice(0, 40).map((c, i) => `${i + 1}. [${c.setName}] ${c.combo}${c.keyword ? ` (키워드:${c.keyword})` : ''}`);
-        const guide = [
-            '투명 strip 이미지가 들어있는 칸을 골라줘.',
-            '번호 또는 "이름_상황" 형식으로 입력하면 돼.',
-            '',
-            `예시 추천값: ${suggested ? suggested.combo : ''}`,
-            '',
-            ...lines,
-            choices.length > 40 ? `... 외 ${choices.length - 40}개` : ''
-        ].filter(Boolean).join('\n');
-
-        const input = prompt(guide, suggested ? suggested.combo : '');
-        if (input === null) return null;
-        const trimmed = String(input).trim();
-        if (!trimmed) return null;
-
-        const index = Number(trimmed);
-        if (Number.isInteger(index) && index >= 1 && index <= choices.length) {
-            return choices[index - 1];
+        // 1순위: 칸 이름/키워드/세트명에 투명·공백·blank 같은 표시가 있으면 바로 사용
+        const labeled = choices.find(labelLooksTransparent);
+        if (labeled) {
+            labeled.detectReason = 'label';
+            return labeled;
         }
 
-        const normalizedInput = trimmed.replace(/\s+/g, '');
-        return choices.find(c => c.combo.replace(/\s+/g, '') === normalizedInput) || null;
+        // 2순위: 이미지 실제 비율로 얇고 긴 strip 자동 감지
+        const inspected = [];
+        const targetChoices = choices.slice(0, 80);
+
+        for (const choice of targetChoices) {
+            const size = await getImageSize(choice.imageUrl);
+            if (!size || !size.width || !size.height) continue;
+
+            const longSide = Math.max(size.width, size.height);
+            const shortSide = Math.max(1, Math.min(size.width, size.height));
+            const ratio = longSide / shortSide;
+
+            inspected.push({
+                ...choice,
+                width: size.width,
+                height: size.height,
+                ratio
+            });
+        }
+
+        inspected.sort((a, b) => b.ratio - a.ratio);
+
+        const strip = inspected.find(item => {
+            const longSide = Math.max(item.width, item.height);
+            const shortSide = Math.min(item.width, item.height);
+            return longSide >= 80 && shortSide <= 20 && item.ratio >= 8;
+        });
+
+        if (strip) {
+            strip.detectReason = 'size';
+            return strip;
+        }
+
+        console.warn(`${LOG} 자동 투명 이미지 감지 실패`, { choices, inspected });
+        return null;
     }
 
 async function fillStoryGaps(storyId) {
@@ -537,9 +589,9 @@ async function fillStoryGaps(storyId) {
                 return;
             }
 
-            const picked = pickPlaceholderChoice(choices);
+            const picked = await pickPlaceholderChoiceAuto(choices);
             if (!picked) {
-                toast('투명 이미지 선택을 취소했어요.', 3600);
+                toast('투명 strip 이미지를 자동으로 못 찾았어요.\n업로드한 투명 이미지 칸 이름에 투명/공백/blank 중 하나를 넣고 저장한 뒤 다시 눌러줘.', 7000);
                 return;
             }
 
@@ -549,6 +601,7 @@ async function fillStoryGaps(storyId) {
                 storyId,
                 added,
                 placeholderChoice: picked,
+                detectReason: picked.detectReason,
                 payload
             });
 
@@ -557,9 +610,13 @@ async function fillStoryGaps(storyId) {
                 return;
             }
 
+            const detected = picked.detectReason === 'size' && picked.width && picked.height
+                ? `${picked.combo} (${picked.width}×${picked.height})`
+                : picked.combo;
+
             const ok = confirm(
-                `선택한 투명 이미지: [${picked.setName}] ${picked.combo}\n\n` +
-                `v2 배치표 빈칸 ${added}개를 이 이미지 URL로 채울까요?\n\n` +
+                `자동 감지한 투명 이미지: [${picked.setName}] ${detected}\n\n` +
+                `v2 배치표 빈칸 ${added}개를 이 이미지로 채울까요?\n\n` +
                 `다른 캐릭터/표정으로 복제하지 않고,\n없는 조합에만 같은 투명 이미지를 넣습니다.`
             );
             if (!ok) {
@@ -645,7 +702,7 @@ async function fillStoryGaps(storyId) {
             return;
         }
 
-        container.appendChild(createButton('🧩 기존 투명 이미지로 빈칸 채우기', () => fillStoryGaps(info.id)));
+        container.appendChild(createButton('🧩 자동으로 빈칸 채우기', () => fillStoryGaps(info.id)));
     }
 
     function init() {
@@ -653,7 +710,7 @@ async function fillStoryGaps(storyId) {
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.2.0`);
+        console.log(`${LOG} 로드 완료 v1.3.0`);
     }
 
     if (document.readyState === 'loading') {
