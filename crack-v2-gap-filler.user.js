@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         크랙 v2 빈칸 투명 채우기
 // @namespace    https://crack.wrtn.ai
-// @version      1.3.0
+// @version      1.4.0
 // @author       me
-// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 스토리 안의 투명 이미지를 자동 감지해 채움
+// @description  재게시 없이 기존 v2 이미지 배치표의 빈 조합을 스토리 안의 투명 이미지를 자동 감지해 즉시 채움
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @updateURL    https://raw.githubusercontent.com/bsei325/crack-republisher/main/crack-v2-gap-filler.user.js
@@ -16,8 +16,8 @@
     const API_BASE = 'https://crack-api.wrtn.ai/crack-api';
     const LOG = '[v2 빈칸 채우기]';
 
-    // 외부 URL(GitHub raw)은 크랙 서버가 유효하지 않은 이미지로 막을 수 있다.
-    // 그래서 이미 스토리 안에 업로드되어 있는 '투명 strip 이미지'의 URL을 골라 그 URL을 재사용한다.
+    // 외부 이미지 URL은 크랙 서버가 막을 수 있어서 사용하지 않는다.
+    // 스토리 안에 이미 업로드되어 있는 투명/공백/strip 이미지를 자동 감지해서 그 URL을 재사용한다.
 
     GM_addStyle(`
         .vgf-toast {
@@ -424,7 +424,8 @@
     }
 
     function buildPatchPayload(raw, placeholderUrl) {
-        const setResults = (Array.isArray(raw?.startingSets) ? raw.startingSets : []).map(set => buildPatchStartingSet(set, placeholderUrl));
+        const setResults = (Array.isArray(raw?.startingSets) ? raw.startingSets : [])
+            .map(set => buildPatchStartingSet(set, placeholderUrl));
         const startingSets = setResults.map(r => r.set);
         const added = setResults.reduce((sum, r) => sum + r.added, 0);
 
@@ -441,7 +442,7 @@
             promptTemplate: normalizeTemplateForPatch(raw?.promptTemplate),
             isCommentBlocked: !!raw?.isCommentBlocked,
             startingSets,
-            shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw?.shortcutCommands : [],
+            shortcutCommands: Array.isArray(raw?.shortcutCommands) ? raw.shortcutCommands : [],
             defaultCrackerModel: raw?.defaultCrackerModel || 'superchat_2_0',
             chatType: normalizeSimpleValue(raw?.chatType) || raw?.chatType || 'rolePlaying',
             genreId: getFirst(raw?.genreId, raw?.genre?._id, raw?.genre?.id),
@@ -459,6 +460,12 @@
     }
 
     
+    function labelLooksTransparent(choice) {
+        return /투명|빈칸|공백|blank|transparent|strip|spacer|empty|틈/i.test(
+            `${choice.combo} ${choice.keyword} ${choice.setName}`
+        );
+    }
+
     function collectExistingImageChoices(raw) {
         const choices = [];
         const seen = new Set();
@@ -468,13 +475,16 @@
             const normalized = normalizeV2SetLabels(set);
             (normalized.situationImages || []).forEach((img, imageIndex) => {
                 if (!img?.imageUrl) return;
+
                 const category = img.category ? String(img.category).slice(0, 10) : '';
                 const situation = img.situation ? String(img.situation).slice(0, 10) : '';
                 const keyword = img.keyword ? String(img.keyword).slice(0, 10) : '';
                 const combo = `${category}_${situation}`;
                 const dedupe = `${combo}|||${img.imageUrl}`;
+
                 if (seen.has(dedupe)) return;
                 seen.add(dedupe);
+
                 choices.push({
                     setName: set?.name || `세트${setIndex + 1}`,
                     category,
@@ -487,13 +497,8 @@
                 });
             });
         });
-        return choices;
-    }
 
-    function labelLooksTransparent(choice) {
-        return /투명|빈칸|공백|blank|transparent|strip|spacer|empty|틈/i.test(
-            `${choice.combo} ${choice.keyword} ${choice.setName}`
-        );
+        return choices;
     }
 
     function getImageSize(url, timeoutMs = 4500) {
@@ -524,21 +529,18 @@
         });
     }
 
-    async function pickPlaceholderChoiceAuto(choices) {
+    async function pickPlaceholderChoiceAuto(raw) {
+        const choices = collectExistingImageChoices(raw);
         if (!choices.length) return null;
 
-        // 1순위: 칸 이름/키워드/세트명에 투명·공백·blank 같은 표시가 있으면 바로 사용
         const labeled = choices.find(labelLooksTransparent);
         if (labeled) {
             labeled.detectReason = 'label';
             return labeled;
         }
 
-        // 2순위: 이미지 실제 비율로 얇고 긴 strip 자동 감지
         const inspected = [];
-        const targetChoices = choices.slice(0, 80);
-
-        for (const choice of targetChoices) {
+        for (const choice of choices.slice(0, 120)) {
             const size = await getImageSize(choice.imageUrl);
             if (!size || !size.width || !size.height) continue;
 
@@ -559,7 +561,7 @@
         const strip = inspected.find(item => {
             const longSide = Math.max(item.width, item.height);
             const shortSide = Math.min(item.width, item.height);
-            return longSide >= 80 && shortSide <= 20 && item.ratio >= 8;
+            return longSide >= 80 && shortSide <= 30 && item.ratio >= 8;
         });
 
         if (strip) {
@@ -567,7 +569,7 @@
             return strip;
         }
 
-        console.warn(`${LOG} 자동 투명 이미지 감지 실패`, { choices, inspected });
+        console.warn(`${LOG} 투명 이미지 자동 감지 실패`, { choices, inspected });
         return null;
     }
 
@@ -583,15 +585,14 @@ async function fillStoryGaps(storyId) {
                 return;
             }
 
-            const choices = collectExistingImageChoices(raw);
-            if (!choices.length) {
-                toast('스토리 안에 등록된 이미지가 없어요.', 4200);
-                return;
-            }
-
-            const picked = await pickPlaceholderChoiceAuto(choices);
+            toast('투명 이미지를 자동으로 찾는 중...');
+            const picked = await pickPlaceholderChoiceAuto(raw);
             if (!picked) {
-                toast('투명 strip 이미지를 자동으로 못 찾았어요.\n업로드한 투명 이미지 칸 이름에 투명/공백/blank 중 하나를 넣고 저장한 뒤 다시 눌러줘.', 7000);
+                toast(
+                    '투명 strip 이미지를 자동으로 못 찾았어요.\n' +
+                    '투명 이미지가 들어간 칸 이름/키워드에 투명, 공백, blank 중 하나를 넣고 저장한 뒤 다시 눌러줘.',
+                    7500
+                );
                 return;
             }
 
@@ -614,20 +615,10 @@ async function fillStoryGaps(storyId) {
                 ? `${picked.combo} (${picked.width}×${picked.height})`
                 : picked.combo;
 
-            const ok = confirm(
-                `자동 감지한 투명 이미지: [${picked.setName}] ${detected}\n\n` +
-                `v2 배치표 빈칸 ${added}개를 이 이미지로 채울까요?\n\n` +
-                `다른 캐릭터/표정으로 복제하지 않고,\n없는 조합에만 같은 투명 이미지를 넣습니다.`
-            );
-            if (!ok) {
-                toast('취소했어요.');
-                return;
-            }
-
-            toast(`빈칸 ${added}개를 기존 투명 이미지로 채우는 중...`, 5000);
+            toast(`자동 감지: ${detected}\n빈칸 ${added}개를 채우는 중...`, 5000);
             await apiFetch('PATCH', `${API_BASE}/stories/${storyId}/v2`, payload, '투명 빈칸 PATCH');
 
-            toast(`✓ 완료!\n빈 조합 ${added}개를 기존 투명 이미지로 채웠어요.`, 5200);
+            toast(`✓ 완료!\n빈 조합 ${added}개를 자동으로 채웠어요.`, 5200);
         } catch (err) {
             console.error(`${LOG} 실패`, err);
             toast('실패 ㅠㅠ\n' + String(err?.message || err).slice(0, 220), 7000);
@@ -710,7 +701,7 @@ async function fillStoryGaps(storyId) {
             childList: true,
             subtree: true
         });
-        console.log(`${LOG} 로드 완료 v1.3.0`);
+        console.log(`${LOG} 로드 완료 v1.4.0`);
     }
 
     if (document.readyState === 'loading') {
