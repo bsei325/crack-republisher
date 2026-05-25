@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      3.0.0
+// @version      3.0.1
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -474,6 +474,17 @@
         document.body.appendChild(overlay);
     }
 
+    // ─────── 에디터 감지 ───────
+
+    function findSaveButton() {
+        const buttons = document.querySelectorAll('button, [role="button"]');
+        for (const btn of buttons) {
+            const text = btn.textContent?.trim();
+            if (text === '임시저장' || text === '임시 저장') return btn;
+        }
+        return null;
+    }
+
     // ─────── 에디터 버튼 삽입 ───────
 
     const EDITOR_MARKER = 'ld-editor-injected';
@@ -517,7 +528,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v3.0.0`);
+        console.log(`${LOG} 로드 완료 v3.0.1`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
