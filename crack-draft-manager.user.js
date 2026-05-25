@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 임시등록 (무제한)
 // @namespace    https://crack.wrtn.ai
-// @version      2.0.0
+// @version      2.1.0
 // @author       me
 // @description  스토리 에디터에서 임시등록(로컬 무제한) + 불러오기. 미등록 슬롯 안 씀!
 // @match        https://crack.wrtn.ai/*
@@ -116,8 +116,9 @@
         return json;
     }
 
-    // ─────── fetch 가로채기 ───────
+    // ─────── React 내부에서 폼 데이터 추출 ───────
 
+    // fetch 가로채기 (3차 대안용)
     let interceptMode = false;
     let interceptResolve = null;
 
@@ -126,36 +127,129 @@
         if (interceptMode && typeof url === 'string' &&
             url.includes('/stories') &&
             (opts.method === 'POST' || opts.method === 'PATCH' || opts.method === 'PUT')) {
-
             let body = null;
             try { body = typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body; } catch (_) {}
-
             if (body && (body.name || body.customPrompt || body.startingSets)) {
-                console.log(`${LOG} fetch 가로채기 성공!`, { url, method: opts.method, keys: Object.keys(body) });
                 interceptMode = false;
                 if (interceptResolve) interceptResolve(body);
-
-                // 가짜 성공 응답 반환 (서버에 안 보냄)
                 return new Response(JSON.stringify({
-                    result: 'SUCCESS',
-                    data: { _id: 'local_temp', name: body.name || '임시' }
+                    result: 'SUCCESS', data: { _id: 'local_temp' }
                 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
             }
         }
-
         return _origFetch.apply(this, arguments);
     };
+
+    function hasStoryKeys(obj) {
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+        const keys = Object.keys(obj);
+        const storyKeys = ['name', 'customPrompt', 'storyDetails', 'startingSets',
+            'situationImageVersion', 'chatType', 'description', 'promptTemplate',
+            'chatExamples', 'tags', 'simpleDescription', 'detailDescription'];
+        return storyKeys.filter(k => keys.includes(k)).length >= 3;
+    }
+
+    function extractFromReactFiber() {
+        // React 루트 찾기
+        const roots = [
+            document.getElementById('__next'),
+            document.getElementById('root'),
+            document.querySelector('[data-reactroot]'),
+            document.body
+        ].filter(Boolean);
+
+        for (const root of roots) {
+            const fiberKey = Object.keys(root).find(k =>
+                k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance'));
+            if (!fiberKey) continue;
+
+            let found = null;
+
+            function walk(fiber, depth) {
+                if (!fiber || found || depth > 80) return;
+
+                // hooks 체인 탐색 (함수 컴포넌트)
+                let hook = fiber.memoizedState;
+                let hookIdx = 0;
+                while (hook && hookIdx < 50) {
+                    const val = hook.memoizedState;
+                    if (val && typeof val === 'object') {
+                        if (hasStoryKeys(val)) { found = val; return; }
+                        if (Array.isArray(val) && val[0] && hasStoryKeys(val[0])) { found = val[0]; return; }
+                    }
+                    if (hook.queue?.lastRenderedState && hasStoryKeys(hook.queue.lastRenderedState)) {
+                        found = hook.queue.lastRenderedState; return;
+                    }
+                    hook = hook.next;
+                    hookIdx++;
+                }
+
+                // 클래스 컴포넌트 state
+                if (fiber.stateNode?.state && hasStoryKeys(fiber.stateNode.state)) {
+                    found = fiber.stateNode.state; return;
+                }
+
+                // props 확인
+                if (fiber.memoizedProps && hasStoryKeys(fiber.memoizedProps)) {
+                    found = fiber.memoizedProps; return;
+                }
+                // props 안의 중첩 객체
+                if (fiber.memoizedProps) {
+                    for (const v of Object.values(fiber.memoizedProps)) {
+                        if (v && typeof v === 'object' && hasStoryKeys(v)) {
+                            found = v; return;
+                        }
+                    }
+                }
+
+                walk(fiber.child, depth + 1);
+                if (!found) walk(fiber.sibling, depth + 1);
+            }
+
+            walk(root[fiberKey], 0);
+            if (found) {
+                console.log(`${LOG} React fiber에서 데이터 발견!`, Object.keys(found));
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    function readFormFromDOM() {
+        const data = {};
+        const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
+        const textareas = document.querySelectorAll('textarea');
+
+        // 첫 번째 input은 보통 이름
+        if (inputs[0]?.value) data.name = inputs[0].value;
+
+        // textarea 내용 수집
+        textareas.forEach((ta, i) => {
+            if (!ta.value) return;
+            if (i === 0 && !data.storyDetails) data.storyDetails = ta.value;
+            else if (i === 1 && !data.customPrompt) data.customPrompt = ta.value;
+        });
+
+        // select 값들
+        document.querySelectorAll('select').forEach(sel => {
+            if (sel.value) {
+                const label = sel.closest('label, [class*="field"]')?.textContent || '';
+                if (label.includes('템플릿') || label.includes('프롬프트')) data.promptTemplate = sel.value;
+            }
+        });
+
+        return Object.keys(data).length >= 1 ? data : null;
+    }
 
     // ─────── 임시등록 (저장) ───────
 
     function findSaveButton() {
-        // 임시저장 버튼 찾기
         const buttons = document.querySelectorAll('button, [role="button"]');
         for (const btn of buttons) {
             const text = btn.textContent?.trim();
             if (text === '임시저장' || text === '임시 저장') return btn;
         }
-        // 헤더 영역에서 찾기
         const headerBtns = document.querySelectorAll('header button, nav button, [class*="header"] button');
         for (const btn of headerBtns) {
             if (btn.textContent?.includes('임시')) return btn;
@@ -164,46 +258,53 @@
     }
 
     async function doLocalSave() {
-        const saveBtn = findSaveButton();
-        if (!saveBtn) {
-            toast('임시저장 버튼을 못 찾았어요 ㅠ\n스토리 에디터 페이지에서 사용해주세요.', 4000);
-            return;
+        toast('데이터 읽는 중...', 3000);
+
+        // 1차: React 내부에서 직접 읽기
+        let capturedData = extractFromReactFiber();
+
+        // 2차: DOM에서 읽기
+        if (!capturedData) {
+            console.warn(`${LOG} React fiber 실패, DOM에서 읽기 시도`);
+            capturedData = readFormFromDOM();
         }
 
-        toast('임시등록 중...', 3000);
-
-        // fetch 가로채기 준비
-        const capturedData = await new Promise((resolve) => {
-            interceptResolve = resolve;
-            interceptMode = true;
-
-            // 5초 타임아웃
-            setTimeout(() => {
-                if (interceptMode) {
-                    interceptMode = false;
-                    resolve(null);
-                }
-            }, 5000);
-
-            // 진짜 임시저장 버튼 클릭 → fetch 발생 → 가로채기
-            saveBtn.click();
-        });
+        // 3차: fetch 가로채기 (임시저장 버튼 클릭)
+        if (!capturedData) {
+            console.warn(`${LOG} DOM 읽기도 실패, fetch 가로채기 시도`);
+            const saveBtn = findSaveButton();
+            if (saveBtn) {
+                capturedData = await new Promise((resolve) => {
+                    interceptResolve = resolve;
+                    interceptMode = true;
+                    setTimeout(() => { if (interceptMode) { interceptMode = false; resolve(null); } }, 5000);
+                    saveBtn.click();
+                });
+            }
+        }
 
         if (!capturedData) {
-            toast('데이터 캡처에 실패했어요 ㅠ\n다시 시도해주세요.', 4000);
+            toast('데이터를 못 읽었어요 ㅠ\n폼에 내용을 채운 후 다시 시도해주세요.', 4000);
             return;
         }
 
-        // 로컬에 저장
+        // 깊은 복사 (React 프록시 객체 대응)
+        let cleanData;
+        try {
+            cleanData = JSON.parse(JSON.stringify(capturedData));
+        } catch (_) {
+            cleanData = { ...capturedData };
+        }
+
         const entry = {
             id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            name: capturedData.name || '이름 없는 스토리',
+            name: cleanData.name || '이름 없는 스토리',
             date: new Date().toISOString(),
-            data: capturedData
+            data: cleanData
         };
 
         addDraft(entry);
-        console.log(`${LOG} 임시등록 완료`, { id: entry.id, name: entry.name, keys: Object.keys(capturedData) });
+        console.log(`${LOG} 임시등록 완료`, { id: entry.id, name: entry.name, keys: Object.keys(cleanData) });
         toast(`✓ 임시등록 완료!\n"${entry.name}" 저장됨 (${loadDrafts().length}개)`, 3500);
     }
 
@@ -470,7 +571,7 @@
     function init() {
         new MutationObserver(() => injectEditorButtons())
             .observe(document.body, { childList: true, subtree: true });
-        console.log(`${LOG} 로드 완료 v2.0.0`);
+        console.log(`${LOG} 로드 완료 v2.1.0`);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
